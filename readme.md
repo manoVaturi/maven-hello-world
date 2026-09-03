@@ -14,6 +14,8 @@ A minimal Java 7/8 app acting as a playground for a production-ready CI/CD pipel
 
 - **Trunk-Based CI/CD:** Fully automated GH Actions for version bumping, artifact packaging, Docker Hub pushes, and container smoke testing.
 
+- **SAST on Fetch:** Semgrep runs straight off checkout, before any build — no compile step required, cheapest possible failure point. Report-only for now (same posture as the Trivy scan below).
+
 **Structure:**
 
 ```text
@@ -66,7 +68,9 @@ pull it back, deploy with Helm, verify, tag the commit.
 
 **Versioning**
 
-Version is resolved from git tags at build time, not stored in `pom.xml` (pom stays `1.0.0` on purpose — the bump only happens inside the CI run). `maven-build` reads the last `vSERIES.*` tag, bumps the patch, stamps it into the pom for that build only, and — on a push to master — tags the commit `vX.Y.Z` and pushes just the tag (`contents: write` scoped to that one job).
+Version is resolved from git tags at build time, not stored in `pom.xml` (pom stays `1.0.0` on purpose — the bump only happens inside the CI run). `maven-build` reads the last `vSERIES.*` tag and bumps the patch, stamping it into the pom for that build only.
+
+The git tag itself (`vX.Y.Z`) is created and pushed as the very last step of `docker-image-build`, after the image has built, smoke-tested, scanned, and actually pushed to Docker Hub — not right after the Maven build. That way a tag only ever exists for a version that genuinely shipped; if the Docker stage fails for any reason, no tag gets created for it (`contents: write` scoped to just that job).
 
 Considered and skipped: committing the bumped pom back to master (bot commit on every push, drifts/conflicts), a third-party version-bump Action (low-trust maintainer, same commit-back problem), GitVersion (real tool, but overkill for a single-branch repo with no release/hotfix flow — revisit if that changes). Tags win here: no bot commits, no third-party trust, and tags don't retrigger the workflow.
 
