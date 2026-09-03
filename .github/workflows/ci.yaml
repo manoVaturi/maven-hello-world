@@ -312,7 +312,11 @@ jobs:
               OUT=$(kubectl logs "$POD")
 
               echo "$OUT"
-              echo "$OUT" | grep -qF "Hello World! from Mano"
+              if ! echo "$OUT" | grep -qF "Hello World! from Mano"; then
+               echo "Error: Expected string 'Hello World! from Mano' was not found in the logs."
+               exit 1 # This forces the pipeline to fail
+               fi
+
               echo "Deploy verified: job completed and output matched"
 
          - name: Debug on failure
