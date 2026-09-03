@@ -1,7 +1,7 @@
 name: myapp CI Pipeline
 on:
    push:
-      branches: [master, feature/ci-**]
+      branches: [master]
       paths-ignore: ["**.md", ".gitignore"]
    pull_request:
       branches: [master]
@@ -174,20 +174,21 @@ jobs:
               ignore-unfixed: true
 
          - name: Authenticate to Docker Hub
-           #   if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+           if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
            uses: docker/login-action@v4
            with:
               username: ${{ secrets.DOCKERHUB_USERNAME }}
               password: ${{ secrets.DOCKERHUB_TOKEN }}
 
          - name: Push image to docker hub
-           #   if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+           if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
            run: |
               set -euo pipefail
               docker push "${IMAGE_NAME}:${TAG}"
               docker push ${{ env.IMAGE_NAME }}:latest
 
          - name: Tag release version
+           if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
            run: |
               set -euo pipefail
 
@@ -201,7 +202,7 @@ jobs:
    docker-pull-run:
       name: Pull image from Docker Hub & Run
       needs: [maven-build, docker-image-build]
-      # if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
       runs-on: ubuntu-latest
       env:
          TAG: ${{ needs['maven-build'].outputs.version }}
@@ -227,6 +228,7 @@ jobs:
    helm-deploy:
       name: Deploy to cluster with Helm
       needs: [docker-pull-run, maven-build]
+      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
       env:
          TAG: ${{ needs['maven-build'].outputs.version }}
       runs-on: ubuntu-latest
