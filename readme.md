@@ -63,3 +63,15 @@ smoke test, helm lint. Nothing is published.
 
 push -> master the release. Same steps, plus: publish to Docker Hub,
 pull it back, deploy with Helm, verify, tag the commit.
+
+**Versioning**
+
+Version is resolved from git tags at build time, not stored in `pom.xml` (pom stays `1.0.0` on purpose — the bump only happens inside the CI run). `maven-build` reads the last `vSERIES.*` tag, bumps the patch, stamps it into the pom for that build only, and — on a push to master — tags the commit `vX.Y.Z` and pushes just the tag (`contents: write` scoped to that one job).
+
+Considered and skipped: committing the bumped pom back to master (bot commit on every push, drifts/conflicts), a third-party version-bump Action (low-trust maintainer, same commit-back problem), GitVersion (real tool, but overkill for a single-branch repo with no release/hotfix flow — revisit if that changes). Tags win here: no bot commits, no third-party trust, and tags don't retrigger the workflow.
+
+**CI, Stage 2 — Docker image**
+
+`docker-image-build` only runs on push to master, not on PRs — Trivy runs with `--exit-code 0` (report-only, never blocks the build), so running the full image build + scan on every PR was pure cost with no gate benefit. It builds, smoke-tests, and Trivy-scans the image, then (master only) logs into Docker Hub and pushes.
+
+Branch ruleset requires the `maven-build` check by name — job id was renamed to match (`build` -> `maven-build`), which is also why `needs['maven-build']` uses bracket syntax instead of dot notation (a hyphen in a GH Actions expression reads as subtraction).

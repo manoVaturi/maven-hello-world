@@ -25,6 +25,8 @@ jobs:
    maven-build:
       name: Build, Test & Scan
       runs-on: ubuntu-latest
+      permissions:
+         contents: write
       outputs:
          version: ${{ steps.version.outputs.version }}
 
@@ -83,6 +85,15 @@ jobs:
               path: myapp/target/myapp-${{ steps.version.outputs.version }}.jar
               if-no-files-found: error
               retention-days: 30
+
+         - name: Tag release version
+           if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+           run: |
+              set -euo pipefail
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag "v${{ steps.version.outputs.version }}"
+              git push origin "v${{ steps.version.outputs.version }}"
 
    docker-image-build:
       name: Docker Image (build, scan, tests)
