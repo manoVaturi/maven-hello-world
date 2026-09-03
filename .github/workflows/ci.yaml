@@ -141,19 +141,16 @@ jobs:
               echo "$OUT"
               echo "$OUT" | grep -qF "Hello World! from Mano"
 
-         - name: Scan image with Trivy
-           run: |
-              docker run --rm \
-              -v /var/run/docker.sock:/var/run/docker.sock \
-              aquasec/trivy:latest image \
-              --scanners vuln \
-              --severity HIGH,CRITICAL \
-              --ignore-unfixed \
-              --exit-code 0 \
-              --format table \
-               "${IMAGE_NAME}:${TAG}"
+         - name: Vulnerability Scan with Trivy
+           uses: aquasecurity/trivy-action@v0.36.0
+           with:
+              image-ref: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+              format: "table"
+              exit-code: "0"
+              severity: "HIGH,CRITICAL"
+              ignore-unfixed: true
 
-         - name: Login to Docker hub
+         - name: Authenticate to Docker Hub
            if: github.event_name == 'push' && github.ref == 'refs/heads/master'
            uses: docker/login-action@v4
            with:
@@ -165,6 +162,7 @@ jobs:
            run: |
               set -euo pipefail
               docker push "${IMAGE_NAME}:${TAG}"
+              docker push ${{ env.IMAGE_NAME }}:latest
 
          - name: Tag release version
            run: |
