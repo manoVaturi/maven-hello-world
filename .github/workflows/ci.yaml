@@ -1,7 +1,7 @@
 name: myapp CI Pipeline
 on:
    push:
-      branches: [master]
+      branches: [master, feature/**]
       paths-ignore: ["**.md", ".gitignore"]
    pull_request:
       branches: [master]
@@ -11,6 +11,10 @@ on:
             description: "Run the full pipeline (build, push, deploy) even with no app changes"
             type: boolean
             default: false
+         tag:
+            description: "Docker Hub image tag to deploy (fast-dev helm-deploy testing)"
+            type: string
+            default: "1.0.6"
 
 concurrency:
    group: ${{ github.workflow }}-${{ github.ref }}
@@ -243,9 +247,9 @@ jobs:
          - name: Create Image Pull Secret
            run: |
               kubectl create secret docker-registry dockerhub-secret \
-                --docker-server=https://index.docker.io/v1/ \
-                --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
-                --docker-password=${{ secrets.DOCKERHUB_TOKEN }}
+                 --docker-server=https://index.docker.io/v1/ \
+                 --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
+                 --docker-password=${{ secrets.DOCKERHUB_TOKEN }}
 
          - name: Load image into kind cluster
            run: |
@@ -256,8 +260,32 @@ jobs:
          - name: Install helm chart
            run: |
               helm upgrade --install myapp ./helm \
-                --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/myapp \
-                --set image.tag=${{ env.TAG }} \
-                --set image.pullPolicy=IfNotPresent \
-                --wait \
-                --timeout 0.5m
+                 --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/myapp \
+                 --set image.tag=${{ env.TAG }} \
+                 --set image.pullPolicy=IfNotPresent \
+                 --wait --wait-for-jobs \
+                 --timeout 1m
+
+         - name: Verify the job completed and printed correctly
+           run: |
+              set -euo pipefail
+              kubectl wait --for=condition=complete job -l app.kubernetes.io/instance=myapp --timeout=30s
+
+              POD=$(kubectl get pods -l app.kubernetes.io/instance=myapp -o jsonpath='{.items[0].metadata.name}')
+              OUT=$(kubectl logs "$POD")
+
+              echo "$OUT"
+              if ! echo "$OUT" | grep -qF "Hello World! from Mano"; then
+               echo "Error: Expected string 'Hello World! from Mano' was not found in the logs."
+               exit 1 # This forces the pipeline to fail
+               fi
+
+              echo "Deploy verified: job completed and output matched"
+
+         - name: Debug on failure
+           if: failure()
+           run: |
+              kubectl get jobs,pods -l app.kubernetes.io/instance=myapp -o wide
+              kubectl describe job -l app.kubernetes.io/instance=myapp
+              POD=$(kubectl get pods -l app.kubernetes.io/instance=myapp -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+              if [ -n "$POD" ]; then kubectl logs "$POD" || true; fi
