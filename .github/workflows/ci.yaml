@@ -1,7 +1,7 @@
 name: myapp CI Pipeline
 on:
    push:
-      branches: [master, ci-**]
+      branches: [master, feature/ci-**]
       paths-ignore: ["**.md", ".gitignore"]
    pull_request:
       branches: [master]
