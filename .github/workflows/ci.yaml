@@ -33,3 +33,26 @@ jobs:
               java-version: ${{ env.JAVA_VERSION }}
               distribution: ${{ env.JAVA_DISTRIBUTION }}
               cache: maven
+
+         - name: Resolve next version
+           id: version
+           working-directory: myapp
+           run: |
+              set -euo pipefail
+              git fetch --tags --force --quiet
+              BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
+              SERIES=$(echo "$BASE" | cut -d. -f1,2)
+              LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
+              if [ -z "$LAST" ]; then
+              VERSION="${SERIES}.1"
+              else
+              VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
+              fi
+              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+              {
+              echo "### Version \`${VERSION}\`"
+              echo ""
+              echo "| pom base | last tag | next |"
+              echo "|---|---|---|"
+              echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
+              } >> "$GITHUB_STEP_SUMMARY"
