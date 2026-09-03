@@ -31,14 +31,11 @@ FROM gcr.io/distroless/java:8 AS final
 
 WORKDIR /app
 
-#non-root user
-USER nonroot
-
-# VFS Bypass (Optional)
-# USER 65532:65532
+# VFS Bypass
+USER 65532:65532
 
 #Copy the compiled JAR from Stage 1
-COPY --chown=nonroot:nonroot --from=build /app/target/*.jar app.jar
+COPY --chown=65532:65532 --from=build /app/target/*.jar app.jar
 
 #Run the application
 ENTRYPOINT [ "java", "-jar", "app.jar" ]
