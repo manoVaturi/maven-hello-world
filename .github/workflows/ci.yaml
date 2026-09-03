@@ -312,7 +312,7 @@ jobs:
               OUT=$(kubectl logs "$POD")
 
               echo "$OUT"
-              if ! echo "$OUT" | grep -qF "Hello World! from Mano"; then
+              if ! echo "$OUT" | grep -qF "Hello World! from Man o"; then
                echo "Error: Expected string 'Hello World! from Mano' was not found in the logs."
                exit 1 # This forces the pipeline to fail
                fi
