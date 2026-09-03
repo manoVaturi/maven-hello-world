@@ -85,7 +85,7 @@ jobs:
               LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
 
               if [ -z "$LAST" ]; then
-              VERSION="${SERIES}.1"
+              VERSION="${SERIES}.0"
               else
               VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
               fi
@@ -279,7 +279,9 @@ jobs:
          - name: Load image into kind cluster
            run: |
               set -euo pipefail
+
               docker load -i /tmp/image.tar
+
               kind load docker-image "${{ secrets.DOCKERHUB_USERNAME }}/myapp:${{ env.TAG }}" --name return-home-cluster
 
          - name: Install helm chart
@@ -314,5 +316,7 @@ jobs:
               kubectl get jobs,pods -l app.kubernetes.io/instance=myapp -o wide
               kubectl describe job -l app.kubernetes.io/instance=myapp
               kubectl get events --sort-by=.lastTimestamp | tail -20
+
               POD=$(kubectl get pods -l app.kubernetes.io/instance=myapp -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
               if [ -n "$POD" ]; then kubectl logs "$POD" || true; fi
