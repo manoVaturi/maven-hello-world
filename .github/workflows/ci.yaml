@@ -136,3 +136,9 @@ jobs:
            with:
               username: ${{ secrets.DOCKERHUB_USERNAME }}
               password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+         - name: Push image to docker hub
+           if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+           run: |
+              set -euo pipefail
+              docker push "${IMAGE_NAME}:${TAG}"
