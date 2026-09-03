@@ -11,6 +11,10 @@ on:
             description: "Run the full pipeline (build, push, deploy) even with no app changes"
             type: boolean
             default: false
+         tag:
+            description: "Docker Hub image tag to deploy (fast-dev helm-deploy testing)"
+            type: string
+            default: "1.0.6"
 
 concurrency:
    group: ${{ github.workflow }}-${{ github.ref }}
@@ -267,7 +271,7 @@ jobs:
       name: Deploy to cluster with Helm
       if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
       env:
-         TAG: "1.0.6"
+         TAG: ${{ github.event.inputs.tag || '1.0.6' }}
       runs-on: ubuntu-latest
       steps:
          - uses: actions/checkout@v7
@@ -296,5 +300,25 @@ jobs:
                  --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/myapp \
                  --set image.tag=${{ env.TAG }} \
                  --set image.pullPolicy=IfNotPresent \
-                 --wait \
-                 --timeout 0.5m
+                 --wait --wait-for-jobs \
+                 --timeout 1m
+
+         - name: Verify the job completed and printed correctly
+           run: |
+              set -euo pipefail
+              kubectl wait --for=condition=complete job -l app.kubernetes.io/instance=myapp --timeout=30s
+
+              POD=$(kubectl get pods -l app.kubernetes.io/instance=myapp -o jsonpath='{.items[0].metadata.name}')
+              OUT=$(kubectl logs "$POD")
+
+              echo "$OUT"
+              echo "$OUT" | grep -qF "Hello World! from Mano"
+              echo "Deploy verified: job completed and output matched"
+
+         - name: Debug on failure
+           if: failure()
+           run: |
+              kubectl get jobs,pods -l app.kubernetes.io/instance=myapp -o wide
+              kubectl describe job -l app.kubernetes.io/instance=myapp
+              POD=$(kubectl get pods -l app.kubernetes.io/instance=myapp -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+              if [ -n "$POD" ]; then kubectl logs "$POD" || true; fi
