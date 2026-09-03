@@ -30,6 +30,6 @@ jobs:
          - name: Setup JDK ${{ env.JAVA_VERSION }}
            uses: actions/setup-java@v6
            with:
-              java-version: ${{ env.JAVA_DISTRIBUTION }}
+              java-version: ${{ env.JAVA_VERSION }}
               distribution: ${{ env.JAVA_DISTRIBUTION }}
               cache: maven
