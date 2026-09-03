@@ -117,3 +117,15 @@ jobs:
               OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
               echo "$OUT"
               echo "$OUT" | grep -qF "Hello World! from Mano"
+
+         - name: Scan image with Trivy
+           run: |
+              docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:latest image \
+              --scanner vuln \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --exit-code 0 \
+              --format table \
+               "${IMAGE_NAME}:${TAG}"
