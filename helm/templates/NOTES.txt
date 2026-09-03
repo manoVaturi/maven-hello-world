@@ -1,0 +1,6 @@
+1. Check the status of your release:
+  kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "helm.name" . }},app.kubernetes.io/instance={{ .Release.Name }}"
+
+2. View application logs:
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "helm.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
+  kubectl logs --namespace {{ .Release.Namespace }} $POD_NAME
