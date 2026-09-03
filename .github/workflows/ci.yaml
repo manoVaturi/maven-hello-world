@@ -39,7 +39,7 @@ jobs:
            run: |
               set -euo pipefail
               docker run --rm -v "${{ github.workspace }}:/src" -w /src semgrep/semgrep \
-              scan --config auto --severity ERROR --severity WARNING
+              semgrep scan --config auto --severity ERROR --severity WARNING
 
          - name: Setup JDK ${{ env.JAVA_VERSION }}
            uses: actions/setup-java@v6
