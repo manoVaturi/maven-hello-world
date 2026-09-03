@@ -1,0 +1,35 @@
+name: myapp CI Pipeline
+on:
+   push:
+      branches: [master]
+      paths-ignore: ["**.md", "docs/**", ".gitignore"]
+   pull_request:
+      branches: [master]
+   workflow_dispatch:
+
+concurrency:
+   group: ${{ github.workflow }}-${{ github.ref }}
+   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+   IMAGE_NAME: ormano/myapp
+   JAVA_VERSION: "8"
+   JAVA_DISTRIBUTION: temurin
+
+jobs:
+   build-test-and-scan:
+      name: Build, Test & Scan
+      runs-on: ubuntu-latest
+
+      steps:
+         # Checkout
+         - name: Checkout Source Code
+           uses: actions/checkout@v7
+           with:
+              fetch-depth: 0
+
+         - name: Setup JDK ${{ env.JAVA_VERSION }}
+           uses: actions/setup-java@v6
+           with:
+              java-version: ${{ env.JAVA_DISTRIBUTION }}
+              distribution: ${{ env.JAVA_DISTRIBUTION }}
+              cache: maven
