@@ -220,12 +220,11 @@ jobs:
                 --docker-server=https://index.docker.io/v1/ \
                 --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
                 --docker-password=${{ secrets.DOCKERHUB_TOKEN }}
-                   - name: Deploy Application with Helm
-                   run: |
 
          - name: Install helm chart
-           run: helm upgrade --install myapp ./helm
-              --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/myapp \
-              --set image.tag=sha-${{ github.sha }}
-              --wait \
-              --timeout 3m
+           run: |
+              helm upgrade --install myapp ./helm \
+                --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/myapp \
+                --set image.tag=sha-${{ github.sha }} \
+                --wait \
+                --timeout 3m
