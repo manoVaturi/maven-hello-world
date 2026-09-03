@@ -87,6 +87,7 @@ jobs:
    docker-image-build:
       name: Docker Image (build, scan, tests)
       needs: maven-build
+      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
       runs-on: ubuntu-latest
       env:
          TAG: ${{ needs['maven-build'].outputs.version }}
