@@ -1,11 +1,16 @@
 name: myapp CI Pipeline
 on:
    push:
-      branches: [master]
+      branches: [master, feature/ci-**]
       paths-ignore: ["**.md", ".gitignore"]
    pull_request:
       branches: [master]
    workflow_dispatch:
+      inputs:
+         force_run:
+            description: "Run the full pipeline (build, push, deploy) even with no app changes"
+            type: boolean
+            default: false
 
 concurrency:
    group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,6 +27,23 @@ env:
    WORKING_DIR: "myapp"
 
 jobs:
+   changes:
+      name: Detect App Changes
+      runs-on: ubuntu-latest
+      outputs:
+         app: ${{ steps.filter.outputs.app }}
+      steps:
+         - uses: actions/checkout@v7
+
+         - name: Check for app changes
+           id: filter
+           uses: dorny/paths-filter@v4.0.3
+           with:
+              filters: |
+                 app:
+                   - '${{ env.WORKING_DIR }}/**'
+                   - 'Dockerfile'
+
    maven-build:
       name: Build, Test & Scan
       runs-on: ubuntu-latest
@@ -55,15 +77,12 @@ jobs:
               set -euo pipefail
               git fetch --tags --force --quiet
 
-
               # Extract baseline from pom.xml
               BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
               SERIES=$(echo "$BASE" | cut -d. -f1,2)
 
-
               # Match latest git tag in the current release series
               LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
-
 
               if [ -z "$LAST" ]; then
               VERSION="${SERIES}.1"
@@ -72,7 +91,6 @@ jobs:
               fi
 
               echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
 
               # Generate audit log in Step Summary
               {
@@ -108,8 +126,8 @@ jobs:
 
    docker-image-build:
       name: Docker Image (build, scan, tests)
-      needs: maven-build
-      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      needs: [maven-build, changes]
+      if: needs.changes.outputs.app == 'true' || github.event.inputs.force_run == 'true'
       runs-on: ubuntu-latest
       permissions:
          contents: write
@@ -156,14 +174,14 @@ jobs:
               ignore-unfixed: true
 
          - name: Authenticate to Docker Hub
-           if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+           #   if: github.event_name == 'push' && github.ref == 'refs/heads/master'
            uses: docker/login-action@v4
            with:
               username: ${{ secrets.DOCKERHUB_USERNAME }}
               password: ${{ secrets.DOCKERHUB_TOKEN }}
 
          - name: Push image to docker hub
-           if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+           #   if: github.event_name == 'push' && github.ref == 'refs/heads/master'
            run: |
               set -euo pipefail
               docker push "${IMAGE_NAME}:${TAG}"
@@ -183,14 +201,13 @@ jobs:
    docker-pull-run:
       name: Pull image from Docker Hub & Run
       needs: [maven-build, docker-image-build]
-      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      # if: github.event_name == 'push' && github.ref == 'refs/heads/master'
       runs-on: ubuntu-latest
       env:
          TAG: ${{ needs['maven-build'].outputs.version }}
 
       steps:
          - name: Authenticate to Docker Hub
-           if: github.event_name == 'push' && github.ref == 'refs/heads/master'
            uses: docker/login-action@v4
            with:
               username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -209,10 +226,36 @@ jobs:
 
    helm-deploy:
       name: Deploy to cluster with Helm
-      needs: docker-pull-run
+      needs: [docker-pull-run, maven-build]
+      env:
+         TAG: ${{ needs['maven-build'].outputs.version }}
       runs-on: ubuntu-latest
       steps:
+         - uses: actions/checkout@v7
+
          - name: Create k8s Kind Cluster
            uses: helm/kind-action@v1
            with:
               cluster_name: return-home-cluster
+
+         - name: Create Image Pull Secret
+           run: |
+              kubectl create secret docker-registry dockerhub-secret \
+                --docker-server=https://index.docker.io/v1/ \
+                --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
+                --docker-password=${{ secrets.DOCKERHUB_TOKEN }}
+
+         - name: Load image into kind cluster
+           run: |
+              set -euo pipefail
+              docker pull "${{ secrets.DOCKERHUB_USERNAME }}/myapp:${{ env.TAG }}"
+              kind load docker-image "${{ secrets.DOCKERHUB_USERNAME }}/myapp:${{ env.TAG }}" --name return-home-cluster
+
+         - name: Install helm chart
+           run: |
+              helm upgrade --install myapp ./helm \
+                --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/myapp \
+                --set image.tag=${{ env.TAG }} \
+                --set image.pullPolicy=IfNotPresent \
+                --wait \
+                --timeout 3m
