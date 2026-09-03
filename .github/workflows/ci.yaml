@@ -14,6 +14,7 @@ env:
    IMAGE_NAME: ormano/myapp
    JAVA_VERSION: "8"
    JAVA_DISTRIBUTION: "temurin"
+   WORKING_DIR: "myapp"
 
 jobs:
    build-test-and-scan:
@@ -36,7 +37,7 @@ jobs:
 
          - name: Resolve next version
            id: version
-           working-directory: myapp
+           working-directory: ${{ env.WORKING_DIR }}
            run: |
               set -euo pipefail
               git fetch --tags --force --quiet
@@ -56,3 +57,14 @@ jobs:
               echo "|---|---|---|"
               echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
               } >> "$GITHUB_STEP_SUMMARY"
+
+         - name: Stamp versiion into the POM
+           working-directory: ${{ env.WORKING_DIR }}
+           run: |
+              mvn -B -ntp versions:set \
+              -DnewVersion="${{ steps.version.outputs.version }}" \
+              -DgenerateBackupPoms=false
+
+         - name: Compile and run unit Tests
+           working-directory: ${{ env.WORKING_DIR }}
+           run: mvn -B -ntp clean verify
