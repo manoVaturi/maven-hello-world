@@ -9,7 +9,7 @@ WORKDIR /app
 # Cache dependencies
 RUN --mount=type=bind,source=myapp/pom.xml,target=pom.xml \
     --mount=type=cache,target=/root/.m2 \
-    mvn dependency:go-offline -B
+    mvn dependency:go-offline -B -ntp
 
 #Copy source files
 COPY myapp/pom.xml ./pom.xml
@@ -21,7 +21,7 @@ ARG APP_VERSION=1.0.0
 # Multi thread-core execution.
 RUN --mount=type=cache,target=/root/.m2 \
     mvn versions:set -DnewVersion=${APP_VERSION} -DgenerateBackupPoms=false && \
-    mvn -B -T 1C clean package -DskipTests
+    mvn -B -ntp -T 1C clean package -DskipTests
 
 
 
