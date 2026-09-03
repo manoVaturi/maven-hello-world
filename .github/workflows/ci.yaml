@@ -260,4 +260,4 @@ jobs:
                 --set image.tag=${{ env.TAG }} \
                 --set image.pullPolicy=IfNotPresent \
                 --wait \
-                --timeout 3m
+                --timeout 0.5m
