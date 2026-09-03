@@ -76,11 +76,15 @@ jobs:
 
               # Generate audit log in Step Summary
               {
+
               echo "### Version \`${VERSION}\`"
+
               echo ""
+
               echo "| pom base | last tag | next |"
               echo "|---|---|---|"
               echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
+
               } >> "$GITHUB_STEP_SUMMARY"
 
          - name: Stamp versiion into the POM
@@ -168,9 +172,12 @@ jobs:
          - name: Tag release version
            run: |
               set -euo pipefail
+
               git config user.name "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"
+
               git tag "v${{ env.TAG }}"
+
               git push origin "v${{ env.TAG }}"
 
    docker-pull-run:
@@ -193,3 +200,13 @@ jobs:
               echo "$OUT"
               echo "$OUT" | grep -qF "Hello World! from Mano"
               echo "Published image verified"
+
+   helm-deploy:
+      name: Deploy to cluster with Helm
+      needs: docker-pull-run
+      runs-on: ubuntu-latest
+      steps:
+         - name: Create k8s Kind Cluster
+           uses: helm/kind-action@v1
+           with:
+              cluster_name: return-home-cluster

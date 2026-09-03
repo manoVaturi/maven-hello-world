@@ -1,0 +1,14 @@
+replicaCount: 1
+
+image:
+  repository: ormano/myapp
+
+  tag: "latest"
+  pullPolicy: Always
+
+command:
+  - sh
+  - -c
+  - "java -jar app.jar && sleep infinity"
+
+resources: {}
