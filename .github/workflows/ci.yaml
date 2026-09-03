@@ -13,7 +13,7 @@ concurrency:
 env:
    IMAGE_NAME: ormano/myapp
    JAVA_VERSION: "8"
-   JAVA_DISTRIBUTION: temurin
+   JAVA_DISTRIBUTION: "temurin"
 
 jobs:
    build-test-and-scan:
