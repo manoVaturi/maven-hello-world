@@ -245,10 +245,17 @@ jobs:
                 --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
                 --docker-password=${{ secrets.DOCKERHUB_TOKEN }}
 
+         - name: Load image into kind cluster
+           run: |
+              set -euo pipefail
+              docker pull "${{ secrets.DOCKERHUB_USERNAME }}/myapp:${{ env.TAG }}"
+              kind load docker-image "${{ secrets.DOCKERHUB_USERNAME }}/myapp:${{ env.TAG }}" --name return-home-cluster
+
          - name: Install helm chart
            run: |
               helm upgrade --install myapp ./helm \
                 --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/myapp \
-                --set image.tag=sha-${{ github.sha }} \
+                --set image.tag=${{ env.TAG }} \
+                --set image.pullPolicy=IfNotPresent \
                 --wait \
                 --timeout 3m
