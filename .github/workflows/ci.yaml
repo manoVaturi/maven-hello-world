@@ -86,7 +86,7 @@ jobs:
 
    docker-image-build:
       name: Docker Image (build, scan, tests)
-      needs: build
+      needs: maven-build
       runs-on: ubuntu-latest
       env:
          TAG: ${{ needs.build.outputs.version }}
