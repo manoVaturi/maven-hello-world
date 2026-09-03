@@ -11,10 +11,6 @@ on:
             description: "Run the full pipeline (build, push, deploy) even with no app changes"
             type: boolean
             default: false
-         tag:
-            description: "Docker Hub image tag to deploy (fast-dev helm-deploy testing)"
-            type: string
-            default: "1.0.6"
 
 concurrency:
    group: ${{ github.workflow }}-${{ github.ref }}
@@ -168,6 +164,16 @@ jobs:
               echo "$OUT"
               echo "$OUT" | grep -qF "Hello World! from Mano"
 
+         - name: Save image for helm-deploy
+           run: docker save "${IMAGE_NAME}:${TAG}" -o /tmp/image.tar
+
+         - name: Upload image artifact
+           uses: actions/upload-artifact@v7
+           with:
+              name: docker-image-${{ env.TAG }}
+              path: /tmp/image.tar
+              retention-days: 1
+
          - name: Vulnerability Scan with Trivy
            uses: aquasecurity/trivy-action@v0.36.0
            with:
@@ -231,13 +237,24 @@ jobs:
 
    helm-deploy:
       name: Deploy to cluster with Helm
-      needs: [docker-pull-run, maven-build]
+      needs: [docker-pull-run, docker-image-build, maven-build]
       if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+      permissions:
+         contents: read
+      timeout-minutes: 10
       env:
          TAG: ${{ needs['maven-build'].outputs.version }}
       runs-on: ubuntu-latest
       steps:
          - uses: actions/checkout@v7
+
+         - name: Lint & template Helm chart
+           run: |
+              set -euo pipefail
+              helm lint ./helm
+              helm template myapp ./helm \
+                 --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/myapp \
+                 --set image.tag=${{ env.TAG }} > /dev/null
 
          - name: Create k8s Kind Cluster
            uses: helm/kind-action@v1
@@ -246,15 +263,23 @@ jobs:
 
          - name: Create Image Pull Secret
            run: |
+              set -euo pipefail
               kubectl create secret docker-registry dockerhub-secret \
                  --docker-server=https://index.docker.io/v1/ \
                  --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
-                 --docker-password=${{ secrets.DOCKERHUB_TOKEN }}
+                 --docker-password=${{ secrets.DOCKERHUB_TOKEN }} \
+                 --dry-run=client -o yaml | kubectl apply -f -
+
+         - name: Download image artifact
+           uses: actions/download-artifact@v7
+           with:
+              name: docker-image-${{ env.TAG }}
+              path: /tmp
 
          - name: Load image into kind cluster
            run: |
               set -euo pipefail
-              docker pull "${{ secrets.DOCKERHUB_USERNAME }}/myapp:${{ env.TAG }}"
+              docker load -i /tmp/image.tar
               kind load docker-image "${{ secrets.DOCKERHUB_USERNAME }}/myapp:${{ env.TAG }}" --name return-home-cluster
 
          - name: Install helm chart
@@ -263,6 +288,7 @@ jobs:
                  --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/myapp \
                  --set image.tag=${{ env.TAG }} \
                  --set image.pullPolicy=IfNotPresent \
+                 --set 'imagePullSecrets[0].name=dockerhub-secret' \
                  --wait --wait-for-jobs \
                  --timeout 1m
 
@@ -287,5 +313,6 @@ jobs:
            run: |
               kubectl get jobs,pods -l app.kubernetes.io/instance=myapp -o wide
               kubectl describe job -l app.kubernetes.io/instance=myapp
+              kubectl get events --sort-by=.lastTimestamp | tail -20
               POD=$(kubectl get pods -l app.kubernetes.io/instance=myapp -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
               if [ -n "$POD" ]; then kubectl logs "$POD" || true; fi
