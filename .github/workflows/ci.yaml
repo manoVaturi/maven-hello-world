@@ -6,6 +6,11 @@ on:
    pull_request:
       branches: [master]
    workflow_dispatch:
+      inputs:
+         force_run:
+            description: "Run the full pipeline (build, push, deploy) even with no app changes"
+            type: boolean
+            default: false
 
 concurrency:
    group: ${{ github.workflow }}-${{ github.ref }}
@@ -41,7 +46,6 @@ jobs:
 
    maven-build:
       name: Build, Test & Scan
-      needs: changes
       runs-on: ubuntu-latest
       outputs:
          version: ${{ steps.version.outputs.version }}
@@ -80,10 +84,7 @@ jobs:
               # Match latest git tag in the current release series
               LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
 
-              if [ -n "$LAST" ] && [ "${{ needs.changes.outputs.app }}" != "true" ]; then
-              # No app changes: keep the current version.
-              VERSION="${LAST#v}"
-              elif [ -z "$LAST" ]; then
+              if [ -z "$LAST" ]; then
               VERSION="${SERIES}.1"
               else
               VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
@@ -98,9 +99,9 @@ jobs:
 
               echo ""
 
-              echo "| pom base | last tag | app changed | next |"
-              echo "|---|---|---|---|"
-              echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${{ needs.changes.outputs.app }}\` | \`${VERSION}\` |"
+              echo "| pom base | last tag | next |"
+              echo "|---|---|---|"
+              echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
 
               } >> "$GITHUB_STEP_SUMMARY"
 
@@ -125,7 +126,8 @@ jobs:
 
    docker-image-build:
       name: Docker Image (build, scan, tests)
-      needs: maven-build
+      needs: [maven-build, changes]
+      if: needs.changes.outputs.app == 'true' || github.event.inputs.force_run == 'true'
       runs-on: ubuntu-latest
       permissions:
          contents: write
@@ -192,12 +194,9 @@ jobs:
               git config user.name "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"
 
-              if git ls-remote --exit-code --tags origin "refs/tags/v${{ env.TAG }}" > /dev/null; then
-                echo "Tag v${{ env.TAG }} already exists — no app changes, skipping."
-              else
-                git tag "v${{ env.TAG }}"
-                git push origin "v${{ env.TAG }}"
-              fi
+              git tag "v${{ env.TAG }}"
+
+              git push origin "v${{ env.TAG }}"
 
    docker-pull-run:
       name: Pull image from Docker Hub & Run
