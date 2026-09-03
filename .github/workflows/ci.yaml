@@ -22,7 +22,7 @@ env:
    WORKING_DIR: "myapp"
 
 jobs:
-   build:
+   maven-build:
       name: Build, Test & Scan
       runs-on: ubuntu-latest
       outputs:
