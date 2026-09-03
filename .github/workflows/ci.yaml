@@ -37,7 +37,7 @@ jobs:
 
          - name: Check for app changes
            id: filter
-           uses: dorny/paths-filter@v3
+           uses: dorny/paths-filter@v4.0.3
            with:
               filters: |
                  app:
