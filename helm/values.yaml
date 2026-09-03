@@ -4,4 +4,10 @@ image:
   tag: "latest"
   pullPolicy: Always
 
-resources: {}
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  # No memory limit: this Java 8 image isn't cgroup-aware (see README),
+  # so it sizes its default heap off host RAM, not a container limit —
+  # a limit here risks an immediate OOMKill rather than a real cap.
