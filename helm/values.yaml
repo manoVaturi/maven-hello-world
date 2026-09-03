@@ -6,9 +6,4 @@ image:
   tag: "latest"
   pullPolicy: Always
 
-command:
-  - sh
-  - -c
-  - "java -jar app.jar && sleep infinity"
-
 resources: {}
