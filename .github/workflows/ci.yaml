@@ -89,7 +89,7 @@ jobs:
       needs: maven-build
       runs-on: ubuntu-latest
       env:
-         TAG: ${{ needs.build.outputs.version }}
+         TAG: ${{ needs['maven-build'].outputs.version }}
       steps:
          - uses: actions/checkout@v7
 
