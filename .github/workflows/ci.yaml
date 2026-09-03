@@ -41,6 +41,7 @@ jobs:
 
    maven-build:
       name: Build, Test & Scan
+      needs: changes
       runs-on: ubuntu-latest
       outputs:
          version: ${{ steps.version.outputs.version }}
@@ -79,7 +80,10 @@ jobs:
               # Match latest git tag in the current release series
               LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
 
-              if [ -z "$LAST" ]; then
+              if [ -n "$LAST" ] && [ "${{ needs.changes.outputs.app }}" != "true" ]; then
+              # No app changes: keep the current version.
+              VERSION="${LAST#v}"
+              elif [ -z "$LAST" ]; then
               VERSION="${SERIES}.1"
               else
               VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
@@ -94,9 +98,9 @@ jobs:
 
               echo ""
 
-              echo "| pom base | last tag | next |"
-              echo "|---|---|---|"
-              echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
+              echo "| pom base | last tag | app changed | next |"
+              echo "|---|---|---|---|"
+              echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${{ needs.changes.outputs.app }}\` | \`${VERSION}\` |"
 
               } >> "$GITHUB_STEP_SUMMARY"
 
@@ -121,8 +125,7 @@ jobs:
 
    docker-image-build:
       name: Docker Image (build, scan, tests)
-      needs: [maven-build, changes]
-      if: needs.changes.outputs.app == 'true'
+      needs: maven-build
       runs-on: ubuntu-latest
       permissions:
          contents: write
@@ -189,9 +192,12 @@ jobs:
               git config user.name "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"
 
-              git tag "v${{ env.TAG }}"
-
-              git push origin "v${{ env.TAG }}"
+              if git ls-remote --exit-code --tags origin "refs/tags/v${{ env.TAG }}" > /dev/null; then
+                echo "Tag v${{ env.TAG }} already exists — no app changes, skipping."
+              else
+                git tag "v${{ env.TAG }}"
+                git push origin "v${{ env.TAG }}"
+              fi
 
    docker-pull-run:
       name: Pull image from Docker Hub & Run
