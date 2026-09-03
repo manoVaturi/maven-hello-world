@@ -25,8 +25,6 @@ jobs:
    maven-build:
       name: Build, Test & Scan
       runs-on: ubuntu-latest
-      permissions:
-         contents: write
       outputs:
          version: ${{ steps.version.outputs.version }}
 
@@ -36,6 +34,12 @@ jobs:
            uses: actions/checkout@v7
            with:
               fetch-depth: 0
+
+         - name: SAST scan with Semgrep
+           run: |
+              set -euo pipefail
+              docker run --rm -v "${{ github.workspace }}:/src" -w /src semgrep/semgrep \
+              scan --config auto --severity ERROR --severity WARNING
 
          - name: Setup JDK ${{ env.JAVA_VERSION }}
            uses: actions/setup-java@v6
@@ -50,15 +54,27 @@ jobs:
            run: |
               set -euo pipefail
               git fetch --tags --force --quiet
+
+
+              # Extract baseline from pom.xml
               BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
               SERIES=$(echo "$BASE" | cut -d. -f1,2)
+
+
+              # Match latest git tag in the current release series
               LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
+
+
               if [ -z "$LAST" ]; then
               VERSION="${SERIES}.1"
               else
               VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
               fi
+
               echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+
+              # Generate audit log in Step Summary
               {
               echo "### Version \`${VERSION}\`"
               echo ""
@@ -86,20 +102,13 @@ jobs:
               if-no-files-found: error
               retention-days: 30
 
-         - name: Tag release version
-           if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-           run: |
-              set -euo pipefail
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git tag "v${{ steps.version.outputs.version }}"
-              git push origin "v${{ steps.version.outputs.version }}"
-
    docker-image-build:
       name: Docker Image (build, scan, tests)
       needs: maven-build
       if: github.event_name == 'push' && github.ref == 'refs/heads/master'
       runs-on: ubuntu-latest
+      permissions:
+         contents: write
       env:
          TAG: ${{ needs['maven-build'].outputs.version }}
       steps:
@@ -123,10 +132,12 @@ jobs:
               cache-to: type=gha,mode=max
               provenance: false
 
-         - name: Smoke Test
+         - name: Smoke Test local container
            run: |
               set -euo pipefail
+
               OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
+
               echo "$OUT"
               echo "$OUT" | grep -qF "Hello World! from Mano"
 
@@ -154,3 +165,11 @@ jobs:
            run: |
               set -euo pipefail
               docker push "${IMAGE_NAME}:${TAG}"
+
+         - name: Tag release version
+           run: |
+              set -euo pipefail
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag "v${{ env.TAG }}"
+              git push origin "v${{ env.TAG }}"
