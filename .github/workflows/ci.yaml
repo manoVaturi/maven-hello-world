@@ -119,15 +119,22 @@ jobs:
               set -euo pipefail
               git fetch --tags --force --quiet
 
-              BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
-              SERIES=$(echo "$BASE" | cut -d. -f1,2)
-
-              LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
-
-              if [ -z "$LAST" ]; then
-                 VERSION="${SERIES}.0"
+              if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+                 BASE="manual"
+                 LAST=""
+                 VERSION="1.0.0"
+                 echo "Manual trigger - using fixed test version ${VERSION}"
               else
-                 VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
+                 BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
+                 SERIES=$(echo "$BASE" | cut -d. -f1,2)
+
+                 LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
+
+                 if [ -z "$LAST" ]; then
+                    VERSION="${SERIES}.0"
+                 else
+                    VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
+                 fi
               fi
 
               echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -234,6 +241,7 @@ jobs:
                } >> "$GITHUB_STEP_SUMMARY"
 
          - name: Tag release version
+           if: github.event_name != 'workflow_dispatch'
            run: |
               set -euo pipefail
               git config user.name "github-actions[bot]"
@@ -266,4 +274,4 @@ jobs:
 
                echo "$OUT"
                echo "$OUT" | grep -qF "${{ env.APP_MESSAGE }}"
-               echo "Published image verified at :{TAG}"
+               echo "Published image verified at ${TAG}"
