@@ -347,3 +347,29 @@ jobs:
                  --set image.tag="${TAG}" \
                  --wait \
                  --timeout 2m
+
+         - name: Verify the job completed and printed correctly
+           run: |
+              set -euo pipefail
+
+              JOB=$(kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/instance="${RELEASE}" -o jsonpath='{.items[0].metadata.name}')
+
+              kubectl wait --for=condition=complete --timeout=60s "job/${JOB}" -n "${NAMESPACE}"
+
+              OUT=$(kubectl logs "job/${JOB}" -n "${NAMESPACE}")
+              echo "$OUT"
+              echo "$OUT" | grep -qF "${{ env.APP_MESSAGE }}"
+
+         - name: Debug on failure
+           if: failure()
+           # best effort, dont let a missing resource kill the debug step itself
+           run: |
+              set -x
+
+              kubectl get pods -n "${NAMESPACE}" -o wide || true
+              kubectl get jobs -n "${NAMESPACE}" -o wide || true
+              kubectl describe job -l app.kubernetes.io/instance="${RELEASE}" -n "${NAMESPACE}" || true
+              kubectl describe pods -l app.kubernetes.io/instance="${RELEASE}" -n "${NAMESPACE}" || true
+              kubectl logs -l app.kubernetes.io/instance="${RELEASE}" -n "${NAMESPACE}" --all-containers --tail=200 || true
+              kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp || true
+              helm status "${RELEASE}" -n "${NAMESPACE}" || true
