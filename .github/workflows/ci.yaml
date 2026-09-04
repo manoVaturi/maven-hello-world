@@ -248,7 +248,7 @@ jobs:
       steps:
          - uses: actions/checkout@v7
 
-         - uses: azure/setup-helm@v4
+         - uses: azure/setup-helm@v5
 
          - name: Create k8s Kind Cluster
            uses: helm/kind-action@v1.15.0
