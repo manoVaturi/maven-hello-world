@@ -25,6 +25,28 @@ env:
    APP_MESSAGE: "Hello World! from Mano"
 
 jobs:
+   changes:
+      name: Detect App Code changes
+      runs-on: ubuntu-latest
+      timeout-minutes: 5
+      outputs:
+         app: ${{ steps.filter.outputs.app }}
+         chart: ${{ steps.filter.outputs.chart }}
+      steps:
+         - uses: actions/checkout@v7
+
+         - name: Check for app/ chart changes
+           id: filter
+           uses: dorny/paths-filter@v4.0.3
+           with:
+              filters: |
+                 app:
+                   - 'myapp/**'
+                   - 'Dockerfile'
+                   - '.dockerignore'
+                 chart:
+                   - 'helm/**'
+
    static-analysis:
       name: Static Analysis (SAST, Dockerfile)
       runs-on: ubuntu-latest
@@ -223,24 +245,3 @@ jobs:
               git config user.email "github-actions[bot]@users.noreply.github.com"
               git tag "v${TAG}"
               git push origin "v${TAG}"
-
-   # docker-pull-run:
-   #    name: Pull image from Docker Hub & Run
-   #    needs: [maven-build, docker-image-build]
-   #    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-   #    runs-on: ubuntu-latest
-   #    env:
-   #       TAG: ${{ needs['maven-build'].outputs.version }}
-
-   #    steps:
-   #       - name: Pull the Image
-   #         run: docker pull "${IMAGE_NAME}:${TAG}"
-
-   # - name: Run Container and compare print
-   #   run: |
-   #      set -euo pipefail
-   #      OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
-
-   #      echo "$OUT"
-   #      echo "$OUT" | grep -qF "Hello World! from Mano"
-   #      echo "Published image verified"
