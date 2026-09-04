@@ -1,8 +1,7 @@
 name: myapp CI Pipeline
 on:
    push:
-      branches: [feature/**]
-      # branches: [master]
+      branches: [master]
       paths-ignore: ["**.md", ".gitignore"]
    pull_request:
       branches: [master]
@@ -177,12 +176,11 @@ jobs:
               if-no-files-found: warn
               retention-days: 7
 
-   # build, scan and push the image, only on master or manual run
+   # build, scan and push the image, only on master or manual run, and only if app code actually changed
    docker-image-build:
       name: Docker Image (Build, Scan , Push)
-      # needs: [changes, maven-build, static-analysis, chart-validation]
-      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
-      needs: [maven-build, static-analysis]
+      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.changes.outputs.app == 'true')
+      needs: [changes, maven-build, static-analysis]
       runs-on: ubuntu-latest
       timeout-minutes: 20
       permissions:
@@ -339,13 +337,14 @@ jobs:
            run: |
               set -euo pipefail
 
-              # --wait blocks till the job actually completes, not just gets created
+              # plain --wait doesn't cover bare Jobs, only Deployments/StatefulSets/etc - need --wait-for-jobs too
               helm upgrade --install "${RELEASE}" "${HELM_CHART_DIR}" \
                  --namespace "${NAMESPACE}" \
                  --create-namespace \
                  --set image.repository="${IMAGE_NAME}" \
                  --set image.tag="${TAG}" \
                  --wait \
+                 --wait-for-jobs \
                  --timeout 2m
 
          - name: Verify the job completed and printed correctly
