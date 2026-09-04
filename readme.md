@@ -1,20 +1,20 @@
 # myapp — Containerized Java Hello World
 
-A minimal Java 7/8 app acting as a playground for a production-ready CI/CD pipeline (Maven, GitHub Actions, Docker multi-stage, Helm/Kubernetes).
+A minimal Java 7/8 app acting as a playground for a CI/CD pipeline (Maven, GitHub Actions, Docker multi-stage, Helm/Kubernetes).
 
-> **Heads up on Java 7/8:** This uses legacy Java to meet strict source code requirements. Since older JVMs are completely blind to Linux Cgroups, I had to manually inject memory flags into the Dockerfile. Without them, the JVM over-allocates RAM, and the Linux OOM Killer shoots the process on sight. Upgrading to Java 17/21+ is highly recommended to drop these hacks.
+> **Heads up on Java 7/8:** This uses legacy Java to meet strict source code requirements. Since older JVMs are completely blind to Linux cgroups, memory flags are injected manually in the Dockerfile. Without them, the JVM over-allocates RAM and the Linux OOM killer shoots the process on sight. Upgrading to Java 17/21+ would drop these hacks.
 
-**Under the Hood:**
+**Under the hood:**
 
-- **Multi-Stage BuildKit & Caching:** Uses Docker BuildKit's aggressive mount caching (--mount=type=cache) for Maven dependencies, completely bypassing redundant network I/O on rebuilds and isolating heavy compilation from the final image.
+- **Layer-cached Maven deps:** `pom.xml` is copied and `dependency:go-offline` runs *before* the source is copied, so dependency resolution is a separate, cacheable layer that only busts when `pom.xml` changes. Combined with buildx's `cache-from/cache-to: type=gha`, this survives across CI runs — but only with the `docker-container` buildx driver (`docker/setup-buildx-action`); the default `docker` driver can't export cache at all.
 
-- **Distroless Runtime:** Zero OS overhead. No `/bin/sh`, no package managers. This kills OS-level CVEs and shrinks the attack surface.
+- **Distroless runtime:** zero OS overhead. No `/bin/sh`, no package manager. Kills OS-level CVEs and shrinks the attack surface.
 
-- **VFS & Kernel-Level Security:** Bypasses Virtual File System text lookups by pinning the runtime directly to numeric IDs (USER 65532:65532). Inode ownership is rewritten on-the-fly (--chown=65532:65532) during the multi-stage copy to ensure strict, unprivileged isolation.
+- **Non-root by UID:** runtime pinned to `USER 65532:65532`, ownership rewritten on copy (`--chown=65532:65532`). The Helm chart's `securityContext` mirrors this exactly (`runAsUser/Group: 65532`, `readOnlyRootFilesystem: true`, all capabilities dropped) since distroless doesn't need a writable root FS.
 
-- **Trunk-Based CI/CD:** Fully automated GH Actions for change detection, version bumping, artifact packaging, Docker Hub pushes, container smoke testing, and a Helm/Kubernetes deploy.
+- **SAST on fetch:** Semgrep runs straight off checkout, before any build. `--error` makes it a real gate — findings fail the job, not just report.
 
-- **SAST on Fetch:** Semgrep runs straight off checkout, before any build — no compile step required, cheapest possible failure point. Report-only for now (same posture as the Trivy scan below).
+- **Helm/Kubernetes deploy:** a throwaway `kind` cluster is spun up on the runner and the app is deployed with Helm as an end-to-end integration check, not a real deployment target.
 
 **Structure:**
 
@@ -28,18 +28,11 @@ helm/
   values.yaml
   templates/
 .github/workflows/
-
 ```
 
 **Init project**
 
-Fork, Clone repo:
-
-GitHub:
-settings -> brances -> add rule for "master"
-require pull request before merging
-require status checks to pass (build-test-and-scan)
-do not allow force pushes
+Fork, clone the repo. On GitHub: Settings → Branches → add a rule for `master` — require a pull request before merging, require the `maven-build` status check, disallow force pushes.
 
 **Build and run locally**
 
@@ -49,59 +42,53 @@ mvn clean package
 java -jar target/myapp-1.0.0.jar
 ```
 
-**Docker (Multi-stage build)**
+**Docker (multi-stage build)**
 
-Build stage:
-Used maven:3.9-eclipse-temurin-8 image for build, closest image i found for Java 7
+Build stage: `maven:3.9-eclipse-temurin-8` — closest available image for Java 7/8.
+Final stage: `gcr.io/distroless/java:8` — ships a non-root user already, ~188MB vs ~444MB for the full `eclipse-temurin-8` image.
 
-Final stage:
-Used gcr.io/distroless/java:8: Distoless
+## CI pipeline
 
-- With eclipse-temurin-8: Image size 444mb
-- With gcr.io/distroless/java:8: Image size 188mb (Also have "nonroot" user already)
+Runs on `push` to **any** branch, and `workflow_dispatch`. No `pull_request` trigger — `push` already fires for every commit, PR or not, so a `pull_request` trigger would just re-run the exact same checks a second time for the same commit.
 
-**CI, Stage 1**
-Trunk-based development, master is protected.
+That has one real cost: a fork's commits never generate a `push` event on this repo, so a fork-submitted PR would get no checks at all. This is a solo repo with no outside contributors, so that's an acceptable trade, not an oversight — revisit if that changes.
 
-PR -> master the gate. Compile, unit tests, image build, container smoke test and a Trivy scan run here. Nothing is published — the image never leaves the runner, no tag is created, nothing is deployed.
+**Validation jobs — `changes`, `static-analysis`, `chart-validation`, `maven-build`:**
 
-push -> master the release. Same steps, plus: publish to Docker Hub, pull it back, deploy with Helm, verify, tag the commit.
+These run on every push, including a WIP feature branch with no PR open yet — that's the point, you get feedback before you even open a PR, not just once it exists.
 
-The `push` trigger only fires on `master` (not feature branches) — a feature branch commit only runs the `pull_request` pipeline. Feature branches used to also be matched by `push`, which meant every commit on an open PR ran the *entire* pipeline twice (once as `push`, once as `pull_request`), including a second Docker Hub publish and a second Helm deploy racing the first.
+- `static-analysis` — hadolint on the Dockerfile, Semgrep SAST (`p/ci` ruleset, `--error` so findings fail the build).
+- `chart-validation` — `helm lint --strict`, `helm template` against a placeholder image (the real one isn't built yet at this point), then `kubeconform` against the actual Kubernetes API schema.
+- `changes` — `dorny/paths-filter` checks whether `myapp/**`, `Dockerfile`, or `.dockerignore` changed. Its output gates `docker-image-build` below.
+- `maven-build` — compiles and runs unit tests, so a broken build fails fast on any branch. This is also the required branch-protection check (`Build, Test & Scan`, matching the job's `name:` field — the check name GitHub reports, not the YAML job id) — it's why `maven-build` deliberately never gates on `needs.changes.outputs.app`: a required check that's conditionally skipped never gets a second run to report success for that commit, so it'd block merging forever on any doc-only or chart-only change.
 
-**Change detection**
+Earlier this repo tried both `push` and `pull_request` triggers together, with a same-repo-vs-fork guard to avoid double-running. That created two check-runs sharing the identical name `Build, Test & Scan` for one commit (one `success`, one `skipped`) — which GitHub's required-status-check matching resolved inconsistently, occasionally leaving a mergeable PR stuck on "Expected — waiting for status to be reported." Dropping `pull_request` removes the duplicate-name case at the source.
 
-A `changes` job (`dorny/paths-filter`) checks whether the push/PR actually touches `myapp/**` or `Dockerfile`. `docker-image-build` — and everything downstream of it (`docker-pull-run`, `helm-deploy`) — only runs when that's true. A commit that only touches the workflow, the Helm chart, or docs still runs `maven-build` (compile/test) for validation, but doesn't build/publish/deploy an image or bump the version.
+**Publish/deploy path — `docker-image-build`, `docker-pull-run`, `helm-deploy`:**
 
-To force a full run regardless (e.g. testing a CI/Helm-only change end to end), trigger the workflow manually via `workflow_dispatch` with the `force_run` input checked — `gh workflow run ci.yaml -f force_run=true`, or "Run workflow" in the Actions tab.
+Gated separately, on `event_name == 'push' && ref == 'refs/heads/master'` (a real merge to `master`) or `workflow_dispatch` (manual, for testing on demand). `docker-image-build` additionally requires `needs.changes.outputs.app == 'true'` on the push path — a commit that only touches docs, the workflow file, or the Helm chart shouldn't trigger a version bump and image publish. Manual dispatch skips that check, since testing the pipeline on demand is the whole point of that trigger.
 
 **Versioning**
 
-Version is resolved from git tags at build time, not stored in `pom.xml` (pom stays `1.0.0` on purpose — the bump only happens inside the CI run). `maven-build` reads the last `vSERIES.*` tag and bumps the patch, stamping it into the pom for that build only. If no tag exists yet in the series, it starts at `SERIES.0`, not `.1` — a fresh repo (or one that's had its tags wiped, as this one was) produces `v1.0.0` first.
+Version is resolved from git tags at build time, not stored in `pom.xml` (pom stays `1.0.0` on purpose — the bump only happens inside the CI run). `maven-build` reads the last `vSERIES.*` tag and bumps the patch; if none exists yet in the series it starts at `SERIES.0`.
 
-The git tag itself (`vX.Y.Z`) is created and pushed as the very last step of `docker-image-build`, after the image has built, smoke-tested, scanned, and actually pushed to Docker Hub — not right after the Maven build. That way a tag only ever exists for a version that genuinely shipped; if the Docker stage fails for any reason, no tag gets created for it (`contents: write` scoped to just that job). Combined with the change-detection gate above, a tag (and a new version) only ever gets created when the app actually changed.
+A manual `workflow_dispatch` run always uses a fixed `1.0.0` test version instead of bumping — it's meant for exercising the pipeline, not shipping a release — and skips the git-tag step entirely (tagging `v1.0.0` a second time would collide with itself).
 
-Considered and skipped: committing the bumped pom back to master (bot commit on every push, drifts/conflicts), a third-party version-bump Action (low-trust maintainer, same commit-back problem), GitVersion (real tool, but overkill for a single-branch repo with no release/hotfix flow — revisit if that changes). Tags win here: no bot commits, no third-party trust, and tags don't retrigger the workflow.
+The real git tag (`vX.Y.Z`) is only created as the last step of `docker-image-build`, after the image has built, smoke-tested, scanned, and actually pushed — so a tag only ever exists for a version that genuinely shipped.
 
-**CI, Stage 2 — Docker image**
+**Docker image stage**
 
-`docker-image-build` builds, smoke-tests, and Trivy-scans the image on every run where the change-detection gate passes (PR or push) — Trivy runs with `--exit-code 0` (report-only, never blocks the build). It also `docker save`s the built image and uploads it as a workflow artifact, so `helm-deploy` can load it directly instead of pulling it back from Docker Hub. The publish steps (Docker Hub login, push, and git tag) are separately guarded to only run on `push` to `master` or a manual `force_run` dispatch, so a PR build never publishes an image or creates a release tag, even though it still exercises the full build/scan/smoke-test path.
+`docker-image-build` builds via buildx, smoke-tests the container (runs it, greps stdout for the expected message), Trivy-scans it (`--exit-code 0`, report-only — doesn't block), `docker save`s it as a workflow artifact for `helm-deploy` to reuse, then logs in and pushes to Docker Hub. `docker-pull-run` does a separate real pull from Docker Hub afterward as the actual "did the publish work" check.
 
-Branch ruleset requires the `maven-build` check by name — job id was renamed to match (`build` -> `maven-build`), which is also why `needs['maven-build']` uses bracket syntax instead of dot notation (a hyphen in a GH Actions expression reads as subtraction).
+**Helm deploy stage**
 
-**CI, Stage 3 — Helm deploy**
+The app is modeled as a Kubernetes `Job`, not a `Deployment` — it's genuinely one-shot (`ENTRYPOINT ["java", "-jar", "app.jar"]` prints and exits), and a `Deployment` would just restart it forever (`restartPolicy: Always` restarts even a clean `exit 0`, and it never reaches `Ready`). The chart carries no Service, Ingress, or autoscaling — this app doesn't serve traffic.
 
-`helm-deploy` only runs alongside a real publish (push to `master`, or a manual `force_run`/`tag` dispatch) — deploying only makes sense once an image actually exists.
+`helm-deploy`:
+- Spins up a `kind` cluster on the runner.
+- Downloads the image artifact `docker-image-build` already saved (not another Docker Hub pull — `docker-pull-run` already proved the registry copy works, so re-pulling here would just be slower, redundant plumbing) and `kind load docker-image`s it straight onto the cluster's node. `imagePullPolicy: IfNotPresent` means the pod uses that local copy without touching a registry.
+- Installs with `helm upgrade --install --wait --wait-for-jobs`. `--wait-for-jobs` matters specifically: plain `--wait` only covers Deployments/StatefulSets/ReplicaSets — it does not wait for a bare `Job` to reach `Complete`, only for it to be created.
+- Verifies by looking up the Job via label selector, `kubectl wait --for=condition=complete`, then grepping its logs for the expected output.
+- On failure, a dedicated step dumps pod/job state, `describe`, events, and logs, so a failed run explains itself in the Action log instead of reporting a bare timeout.
 
-The app is modeled in the chart as a Kubernetes `Job`, not a `Deployment`. It's genuinely one-shot — `ENTRYPOINT ["java", "-jar", "app.jar"]` prints and exits — and as a `Deployment` that meant a permanent restart loop (`restartPolicy: Always` restarts a container even on a clean `exit 0`, and it never settles into `Ready`). A `Job` (`restartPolicy: Never`, `backoffLimit: 2`) reaches a real `Complete` status instead. First attempt at fixing this tried keeping the Deployment and wiring a `command: sh -c "java -jar app.jar && sleep infinity"` override to fake a long-running process — that doesn't work at all, because `gcr.io/distroless/java:8` has no shell to run `sh -c` with. The chart carries no Service, ServiceAccount, Ingress, HTTPRoute, or autoscaling either — this app doesn't serve traffic, so none of that would be real.
-
-What the job does, in order:
-- **Lints and renders the chart** (`helm lint` + `helm template`) *before* the `kind` cluster even exists, so a broken chart fails fast without paying for cluster bootstrap.
-- Creates the `kind` cluster, then creates a `dockerhub-secret` image-pull secret **idempotently** (`--dry-run=client | kubectl apply`, not a bare `create`) and wires it into the chart via `imagePullSecrets` — a fallback pull path, not the primary one.
-- **Gets the image via a workflow artifact**, not another Docker Hub pull: `docker-image-build` `docker save`s the image it already built and uploads it; this job downloads and `docker load`s it. `docker-pull-run` still does a real Docker Hub pull earlier in the pipeline — that's the actual "did the publish work" check — so re-pulling here would just be slower, redundant internal plumbing.
-- **Preloads the image into the cluster's node** with `kind load docker-image` (`imagePullPolicy: IfNotPresent`) instead of letting the cluster pull anything over the network — that network pull was slow and occasionally blew through Helm's `--wait --timeout`.
-- Installs with `helm upgrade --install --wait --wait-for-jobs`. The `--wait-for-jobs` matters specifically: for a bare `Job`, plain `--wait` only waits for the object to be *created*, not for it to finish — without it, this step reported success while the pod was still `ContainerCreating`.
-- **Verifies the deploy**: `kubectl wait --for=condition=complete` on the Job, then greps the pod's logs for the expected output. This has to live here rather than in a Helm test hook, because a hook pod running the same shell-less distroless image could only assert on its own exit code (which `--wait-for-jobs` already covers), not on log content.
-- On failure, dumps job/pod status, `describe`, `kubectl get events`, and the pod's logs, so a failed run explains itself instead of reporting a bare timeout.
-
-Also: `timeout-minutes: 10` at the job level (GH Actions defaults to 6 hours otherwise) and explicit `permissions: contents: read` (this job doesn't push tags, unlike `docker-image-build`). The chart sets a small `resources.requests` in `values.yaml` but deliberately no `limits` — this JVM isn't cgroup-aware (see the Java 7/8 note up top), so it sizes its default heap off host RAM rather than any container limit; a `limits.memory` here would likely trigger an immediate `OOMKilled` rather than act as a real cap.
+`values.yaml` sets a small `resources.requests` but deliberately no `limits.memory` — this JVM isn't cgroup-aware by default (see the Java 7/8 note above), so a container memory limit risks a silent kernel OOM-kill that the JVM's own `-XX:+ExitOnOutOfMemoryError` can't catch (that only fires on a Java-heap OOM, not an external cgroup kill).

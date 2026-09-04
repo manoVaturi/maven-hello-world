@@ -1,11 +1,6 @@
 name: myapp CI Pipeline
 on:
    push:
-      branches: [feature/**]
-      # branches: [master]
-      paths-ignore: ["**.md", ".gitignore"]
-   pull_request:
-      branches: [master]
    workflow_dispatch:
 
 concurrency:
@@ -25,6 +20,7 @@ env:
    APP_MESSAGE: "Hello World! from Mano"
 
 jobs:
+   # Check if there any changes in the app code\dockerfile or chart
    changes:
       name: Detect App Code changes
       runs-on: ubuntu-latest
@@ -47,6 +43,7 @@ jobs:
                  chart:
                    - 'helm/**'
 
+   # Shift left SAST
    static-analysis:
       name: Static Analysis (SAST, Dockerfile)
       runs-on: ubuntu-latest
@@ -69,30 +66,36 @@ jobs:
               --severity ERROR --severity WARNING --metrics=off --error \
               --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
 
-   # chart-validation:
-   #    name: Validation of Helm Chart
-   #    runs-on: ubuntu-latest
-   #    timeout-minutes: 10
-   #    steps:
-   #       - uses: actions/checkout@v7
+   # Validation of cutom helm chart
+   chart-validation:
+      name: Validation of Helm Chart
+      runs-on: ubuntu-latest
+      timeout-minutes: 10
+      steps:
+         - uses: actions/checkout@v7
 
-   #       - uses: azure/setup-helm@v5.0.0
+         - uses: azure/setup-helm@v5.0.0
 
-   #       - name: Lint chart
-   #         run: |
-   #            set -euo pipefail
+         - name: Lint chart
+           run: |
+              set -euo pipefail
 
-   #            helm lint "${HELM_CHART_DIR}" --strict
+              helm lint "${HELM_CHART_DIR}" --strict
 
-   #       - name: Render templates
-   #         run: helm template myapp "${{ env.HELM_CHART_DIR }}" --output-dir rendered
+         - name: Render templates
+           run: |
+              helm template myapp "${{ env.HELM_CHART_DIR }}" \
+                 --set image.repository=validation-placeholder \
+                 --set image.tag=0.0.0 \
+                 --output-dir rendered
 
-   #       - name: Validate rendered manifests against k8s schema
-   #         uses: docker://ghcr.io/yannh/kubeconform:latest
-   #         with:
-   #            entrypoint: /kubeconform
-   #            args: -strict -summary rendered
+         - name: Validate rendered manifests against k8s schema
+           uses: docker://ghcr.io/yannh/kubeconform:latest
+           with:
+              entrypoint: /kubeconform
+              args: -strict -summary rendered
 
+   # Maven build, tests and scans before packing to a container
    maven-build:
       name: Build, Test & Scan
       runs-on: ubuntu-latest
@@ -119,6 +122,7 @@ jobs:
               set -euo pipefail
               git fetch --tags --force --quiet
 
+              # manual trigger = testing, dont bump the real version
               if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
                  BASE="manual"
                  LAST=""
@@ -168,11 +172,11 @@ jobs:
               if-no-files-found: warn
               retention-days: 7
 
+   # build, scan and push the image, only on master or manual run, and only if app code actually changed
    docker-image-build:
       name: Docker Image (Build, Scan , Push)
-      # needs: [changes, maven-build, static-analysis, chart-validation]
-      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
-      needs: [maven-build, static-analysis]
+      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.changes.outputs.app == 'true')
+      needs: [changes, maven-build, static-analysis]
       runs-on: ubuntu-latest
       timeout-minutes: 20
       permissions:
@@ -197,7 +201,7 @@ jobs:
                  ${{ env.IMAGE_NAME }}:${{ env.TAG }}
                  ${{ env.IMAGE_NAME }}:latest
               cache-from: type=gha
-              cache-to: type=gha,mode=max
+              cache-to: type=gha,mode=max # needs buildx, docker driver cant export cache
               provenance: false
 
          - name: Smoke test local Container
@@ -217,6 +221,16 @@ jobs:
               exit-code: "0"
               severity: "HIGH,CRITICAL"
               ignore-unfixed: true
+
+         - name: Save image for helm-deploy
+           run: docker save "${IMAGE_NAME}:${TAG}" -o /tmp/image.tar
+
+         - name: Upload image artifact
+           uses: actions/upload-artifact@v7
+           with:
+              name: docker-image-${{ env.TAG }}
+              path: /tmp/image.tar
+              retention-days: 1
 
          - name: Authenticate to Docker Hub
            uses: docker/login-action@v4
@@ -241,7 +255,7 @@ jobs:
                } >> "$GITHUB_STEP_SUMMARY"
 
          - name: Tag release version
-           if: github.event_name != 'workflow_dispatch'
+           if: github.event_name != 'workflow_dispatch' # manual runs reuse 1.0.0, tag would already exist
            run: |
               set -euo pipefail
               git config user.name "github-actions[bot]"
@@ -249,6 +263,7 @@ jobs:
               git tag "v${TAG}"
               git push origin "v${TAG}"
 
+   # make sure what we pushed actually works, pull it back and run it
    docker-pull-run:
       name: Verify pushed image
       needs: [maven-build, docker-image-build]
@@ -275,3 +290,81 @@ jobs:
                echo "$OUT"
                echo "$OUT" | grep -qF "${{ env.APP_MESSAGE }}"
                echo "Published image verified at ${TAG}"
+
+   # spin up throwaway kind cluster and deploy with helm, local image only
+   helm-deploy:
+      name: Create k8s cluster and deploy app with Helm
+      needs: [maven-build, docker-image-build]
+      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+      runs-on: ubuntu-latest
+      timeout-minutes: 15
+      permissions:
+         contents: read
+
+      env:
+         TAG: ${{ needs['maven-build'].outputs.version }}
+         RELEASE: myapp
+         NAMESPACE: myapp
+
+      steps:
+         - uses: actions/checkout@v7
+
+         - uses: azure/setup-helm@v4
+
+         - name: Create k8s Kind Cluster
+           uses: helm/kind-action@v1
+           with:
+              cluster_name: return-home-cluster
+
+         - name: Download image artifact
+           uses: actions/download-artifact@v7
+           with:
+              name: docker-image-${{ env.TAG }}
+              path: /tmp
+
+         - name: Load image into cluster
+           run: |
+              set -euo pipefail
+
+              docker load -i /tmp/image.tar
+              kind load docker-image "${IMAGE_NAME}:${TAG}" --name return-home-cluster
+
+         - name: Install helm chart
+           run: |
+              set -euo pipefail
+
+              # plain --wait doesn't cover bare Jobs, only Deployments/StatefulSets/etc - need --wait-for-jobs too
+              helm upgrade --install "${RELEASE}" "${HELM_CHART_DIR}" \
+                 --namespace "${NAMESPACE}" \
+                 --create-namespace \
+                 --set image.repository="${IMAGE_NAME}" \
+                 --set image.tag="${TAG}" \
+                 --wait \
+                 --wait-for-jobs \
+                 --timeout 2m
+
+         - name: Verify the job completed and printed correctly
+           run: |
+              set -euo pipefail
+
+              JOB=$(kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/instance="${RELEASE}" -o jsonpath='{.items[0].metadata.name}')
+
+              kubectl wait --for=condition=complete --timeout=60s "job/${JOB}" -n "${NAMESPACE}"
+
+              OUT=$(kubectl logs "job/${JOB}" -n "${NAMESPACE}")
+              echo "$OUT"
+              echo "$OUT" | grep -qF "${{ env.APP_MESSAGE }}"
+
+         - name: Debug on failure
+           if: failure()
+           # best effort, dont let a missing resource kill the debug step itself
+           run: |
+              set -x
+
+              kubectl get pods -n "${NAMESPACE}" -o wide || true
+              kubectl get jobs -n "${NAMESPACE}" -o wide || true
+              kubectl describe job -l app.kubernetes.io/instance="${RELEASE}" -n "${NAMESPACE}" || true
+              kubectl describe pods -l app.kubernetes.io/instance="${RELEASE}" -n "${NAMESPACE}" || true
+              kubectl logs -l app.kubernetes.io/instance="${RELEASE}" -n "${NAMESPACE}" --all-containers --tail=200 || true
+              kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp || true
+              helm status "${RELEASE}" -n "${NAMESPACE}" || true
