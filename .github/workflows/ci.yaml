@@ -22,6 +22,7 @@ env:
    JAVA_DISTRIBUTION: "temurin"
    WORKING_DIR: "myapp"
    HELM_CHART_DIR: "helm"
+   APP_MESSAGE: "Hello World! from Mano"
 
 jobs:
    static-analysis:
@@ -140,6 +141,10 @@ jobs:
 
    docker-image-build:
       name: Docker Image (Build, Scan , Push)
+
+      # needs: [changes, maven-build, static-analysis, chart-validation]
+      # if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
       needs: [maven-build, static-analysis]
       runs-on: ubuntu-latest
       timeout-minutes: 20
@@ -168,75 +173,56 @@ jobs:
               cache-to: type=gha,mode=max
               provenance: false
 
-   # docker-image-build:
-   #    name: Docker Image (build, scan, tests)
-   #    needs: maven-build
-   #    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-   #    runs-on: ubuntu-latest
-   #    permissions:
-   #       contents: write
-   #    env:
-   #       TAG: ${{ needs['maven-build'].outputs.version }}
-   #    steps:
-   #       - uses: actions/checkout@v7
+         - name: Smoke test local Container
+           run: |
+              set -euo pipefail
 
-   #       - uses: docker/setup-buildx-action@v4
+              OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
 
-   #       - name: Build image locally
-   #         uses: docker/build-push-action@v7.3.0
-   #         with:
-   #            context: .
-   #            file: Dockerfile
-   #            load: true
-   #            push: false
-   #            build-args: |
-   #               APP_VERSION=${{ env.TAG }}
-   #            tags: |
-   #               ${{ env.IMAGE_NAME }}:${{ env.TAG }}
-   #               ${{ env.IMAGE_NAME }}:latest
-   #            cache-from: type=gha
-   #            cache-to: type=gha,mode=max
-   #            provenance: false
+              echo "$OUT"
+              echo "$OUT" | grep -qF "${{ env.APP_MESSAGE }}"
 
-   #       - name: Smoke Test local container
-   #         run: |
-   #            set -euo pipefail
+         - name: Vulnerability image scan with Trivy
+           uses: aquasecurity/trivy-action@v0.36.0
+           with:
+              image-ref: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+              format: "table"
+              exit-code: "0"
+              severity: "HIGH,CRITICAL"
+              ignore-unfixed: true
 
-   #            OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
+         - name: Authenticate to Docker Hub
+           #   if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+           uses: docker/login-action@v4
+           with:
+              username: ${{ secrets.DOCKERHUB_USERNAME }}
+              password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-   #            echo "$OUT"
-   #            echo "$OUT" | grep -qF "Hello World! from Mano"
+         - name: Push image to Docker Hub
+           #   if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+           run: |
+              set -euo pipefail
 
-   #       - name: Vulnerability Scan with Trivy
-   #         uses: aquasecurity/trivy-action@v0.36.0
-   #         with:
-   #            image-ref: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
-   #            format: "table"
-   #            exit-code: "0"
-   #            severity: "HIGH,CRITICAL"
-   #            ignore-unfixed: true
+              docker push "${IMAGE_NAME}:${TAG}"
+              docker push "${IMAGE_NAME}:latest"
 
-   #       - name: Authenticate to Docker Hub
-   #         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-   #         uses: docker/login-action@v4
-   #         with:
-   #            username: ${{ secrets.DOCKERHUB_USERNAME }}
-   #            password: ${{ secrets.DOCKERHUB_TOKEN }}
+               {
+                  echo "### Published"
+                  echo ""
+                  echo "| field | value |"
+                  echo "|---|---|"
+                  echo "| tag | \`${TAG}\` |"
+                  echo "| commit tag | \`sha-${GITHUB_SHA}\` |"
+               } >> "$GITHUB_STEP_SUMMARY"
 
-   #       - name: Push image to docker hub
-   #         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-   #         run: |
-   #            set -euo pipefail
-   #            docker push "${IMAGE_NAME}:${TAG}"
-   #            docker push ${{ env.IMAGE_NAME }}:latest
-
-   #       - name: Tag release version
-   #         run: |
-   #            set -euo pipefail
-   #            git config user.name "github-actions[bot]"
-   #            git config user.email "github-actions[bot]@users.noreply.github.com"
-   #            git tag "v${{ env.TAG }}"
-   #            git push origin "v${{ env.TAG }}"
+         - name: Tag release version
+           #   if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+           run: |
+              set -euo pipefail
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag "v${TAG}"
+              git push origin "v${TAG}"
 
    # docker-pull-run:
    #    name: Pull image from Docker Hub & Run
@@ -250,11 +236,11 @@ jobs:
    #       - name: Pull the Image
    #         run: docker pull "${IMAGE_NAME}:${TAG}"
 
-   #       - name: Run Container and compare print
-   #         run: |
-   #            set -euo pipefail
-   #            OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
+   # - name: Run Container and compare print
+   #   run: |
+   #      set -euo pipefail
+   #      OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
 
-   #            echo "$OUT"
-   #            echo "$OUT" | grep -qF "Hello World! from Mano"
-   #            echo "Published image verified"
+   #      echo "$OUT"
+   #      echo "$OUT" | grep -qF "Hello World! from Mano"
+   #      echo "Published image verified"
