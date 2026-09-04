@@ -1,0 +1,19 @@
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+job:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 300
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+nameOverride: ""
+fullnameOverride: ""

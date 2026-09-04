@@ -1,0 +1,10 @@
+Job "{{ include "myapp.fullname" . }}" has been scheduled.
+
+Check status:
+  kubectl get job {{ include "myapp.fullname" . }} -n {{ .Release.Namespace }}
+
+Wait for completion:
+  kubectl wait --for=condition=complete --timeout=60s job/{{ include "myapp.fullname" . }} -n {{ .Release.Namespace }}
+
+View logs:
+  kubectl logs job/{{ include "myapp.fullname" . }} -n {{ .Release.Namespace }}
