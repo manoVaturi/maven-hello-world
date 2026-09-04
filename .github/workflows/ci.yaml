@@ -1,7 +1,6 @@
 name: myapp CI Pipeline
 on:
    push:
-      paths-ignore: ["**.md", ".gitignore"]
    workflow_dispatch:
 
 concurrency:
