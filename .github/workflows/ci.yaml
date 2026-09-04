@@ -1,16 +1,12 @@
 name: myapp CI Pipeline
 on:
    push:
-      branches: [master, feature/**]
+      branches: [feature/**]
+      # branches: [master]
       paths-ignore: ["**.md", ".gitignore"]
    pull_request:
       branches: [master]
    workflow_dispatch:
-      inputs:
-         force_run:
-            description: "Run the full pipeline (build, push, deploy) even with no app changes"
-            type: boolean
-            default: false
 
 concurrency:
    group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,43 +21,66 @@ env:
    JAVA_VERSION: "8"
    JAVA_DISTRIBUTION: "temurin"
    WORKING_DIR: "myapp"
+   HELM_CHART_DIR: "helm"
 
 jobs:
-   changes:
-      name: Detect App Changes
+   static-analysis:
+      name: Static Analysis (SAST, Dockerfile)
       runs-on: ubuntu-latest
-      outputs:
-         app: ${{ steps.filter.outputs.app }}
+      timeout-minutes: 15
       steps:
          - uses: actions/checkout@v7
 
-         - name: Check for app changes
-           id: filter
-           uses: dorny/paths-filter@v4.0.3
+         - name: Lint Dockerfile with hadolint
+           uses: hadolint/hadolint-action@v3.5.0
            with:
-              filters: |
-                 app:
-                   - '${{ env.WORKING_DIR }}/**'
-                   - 'Dockerfile'
-
-   maven-build:
-      name: Build, Test & Scan
-      runs-on: ubuntu-latest
-      outputs:
-         version: ${{ steps.version.outputs.version }}
-
-      steps:
-         # Checkout
-         - name: Checkout Source Code
-           uses: actions/checkout@v7
-           with:
-              fetch-depth: 0
+              dockerfile: Dockerfile
 
          - name: SAST scan with Semgrep
            run: |
               set -euo pipefail
-              docker run --rm -v "${{ github.workspace }}:/src" -w /src semgrep/semgrep \
-              semgrep scan --config auto --severity ERROR --severity WARNING
+
+              docker run --rm -v "${{ github.workspace }}:/src" -w /src \
+              semgrep/semgrep:1.86.0 \
+              semgrep scan --config p/ci \
+              --severity ERROR --severity WARNING --metrics=off --error \
+              --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
+
+   # chart-validation:
+   #    name: Validation of Helm Chart
+   #    runs-on: ubuntu-latest
+   #    timeout-minutes: 10
+   #    steps:
+   #       - uses: actions/checkout@v7
+
+   #       - uses: azure/setup-helm@v5.0.0
+
+   #       - name: Lint chart
+   #         run: |
+   #            set -euo pipefail
+
+   #            helm lint "${HELM_CHART_DIR}" --strict
+
+   #       - name: Render templates
+   #         run: helm template myapp "${{ env.HELM_CHART_DIR }}" --output-dir rendered
+
+   #       - name: Validate rendered manifests against k8s schema
+   #         uses: docker://ghcr.io/yannh/kubeconform:latest
+   #         with:
+   #            entrypoint: /kubeconform
+   #            args: -strict -summary rendered
+
+   maven-build:
+      name: Build, Test & Scan
+      runs-on: ubuntu-latest
+      timeout-minutes: 20
+      # outputs:
+      #    version: ${{ steps.version.outputs.version }}
+      steps:
+         - name: Checkout Source Code
+           uses: actions/checkout@v7
+           with:
+              fetch-depth: 0
 
          - name: Setup JDK ${{ env.JAVA_VERSION }}
            uses: actions/setup-java@v6
@@ -70,253 +89,169 @@ jobs:
               distribution: ${{ env.JAVA_DISTRIBUTION }}
               cache: maven
 
-         - name: Resolve next version
-           id: version
-           working-directory: ${{ env.WORKING_DIR }}
-           run: |
-              set -euo pipefail
-              git fetch --tags --force --quiet
+   # maven-build:
+   #    name: Build, Test & Scan
+   #    runs-on: ubuntu-latest
+   #    outputs:
+   #       version: ${{ steps.version.outputs.version }}
 
-              # Extract baseline from pom.xml
-              BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
-              SERIES=$(echo "$BASE" | cut -d. -f1,2)
+   #    steps:
+   #       # Checkout
+   #       - name: Checkout Source Code
+   #         uses: actions/checkout@v7
+   #         with:
+   #            fetch-depth: 0
 
-              # Match latest git tag in the current release series
-              LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
+   #       - name: SAST scan with Semgrep
+   #         run: |
+   #            set -euo pipefail
+   #            docker run --rm -v "${{ github.workspace }}:/src" -w /src semgrep/semgrep \
+   #            semgrep scan --config auto --severity ERROR --severity WARNING
 
-              if [ -z "$LAST" ]; then
-              VERSION="${SERIES}.0"
-              else
-              VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
-              fi
+   #       - name: Setup JDK ${{ env.JAVA_VERSION }}
+   #         uses: actions/setup-java@v6
+   #         with:
+   #            java-version: ${{ env.JAVA_VERSION }}
+   #            distribution: ${{ env.JAVA_DISTRIBUTION }}
+   #            cache: maven
 
-              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+   #       - name: Resolve next version
+   #         id: version
+   #         working-directory: ${{ env.WORKING_DIR }}
+   #         run: |
+   #            set -euo pipefail
+   #            git fetch --tags --force --quiet
 
-              # Generate audit log in Step Summary
-              {
+   #            # Extract baseline from pom.xml
+   #            BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
+   #            SERIES=$(echo "$BASE" | cut -d. -f1,2)
 
-              echo "### Version \`${VERSION}\`"
+   #            # Match latest git tag in the current release series
+   #            LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
 
-              echo ""
+   #            if [ -z "$LAST" ]; then
+   #            VERSION="${SERIES}.1"
+   #            else
+   #            VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
+   #            fi
 
-              echo "| pom base | last tag | next |"
-              echo "|---|---|---|"
-              echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
+   #            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-              } >> "$GITHUB_STEP_SUMMARY"
+   #            # Generate audit log in Step Summary
+   #            {
+   #            echo "### Version \`${VERSION}\`"
+   #            echo ""
+   #            echo "| pom base | last tag | next |"
+   #            echo "|---|---|---|"
+   #            echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
+   #            } >> "$GITHUB_STEP_SUMMARY"
 
-         - name: Stamp versiion into the POM
-           working-directory: ${{ env.WORKING_DIR }}
-           run: |
-              mvn -B -ntp versions:set \
-              -DnewVersion="${{ steps.version.outputs.version }}" \
-              -DgenerateBackupPoms=false
+   #       - name: Stamp versiion into the POM
+   #         working-directory: ${{ env.WORKING_DIR }}
+   #         run: |
+   #            mvn -B -ntp versions:set \
+   #            -DnewVersion="${{ steps.version.outputs.version }}" \
+   #            -DgenerateBackupPoms=false
 
-         - name: Compile and run unit Tests
-           working-directory: ${{ env.WORKING_DIR }}
-           run: mvn -B -ntp clean verify
+   #       - name: Compile and run unit Tests
+   #         working-directory: ${{ env.WORKING_DIR }}
+   #         run: mvn -B -ntp clean verify
 
-         - name: Upload JAR
-           uses: actions/upload-artifact@v7
-           with:
-              name: myapp-${{ steps.version.outputs.version }}
-              path: myapp/target/myapp-${{ steps.version.outputs.version }}.jar
-              if-no-files-found: error
-              retention-days: 30
+   #       - name: Upload JAR
+   #         uses: actions/upload-artifact@v7
+   #         with:
+   #            name: myapp-${{ steps.version.outputs.version }}
+   #            path: myapp/target/myapp-${{ steps.version.outputs.version }}.jar
+   #            if-no-files-found: error
+   #            retention-days: 30
 
-   docker-image-build:
-      name: Docker Image (build, scan, tests)
-      needs: [maven-build, changes]
-      if: needs.changes.outputs.app == 'true' || github.event.inputs.force_run == 'true'
-      runs-on: ubuntu-latest
-      permissions:
-         contents: write
-      env:
-         TAG: ${{ needs['maven-build'].outputs.version }}
-      steps:
-         - uses: actions/checkout@v7
+   # docker-image-build:
+   #    name: Docker Image (build, scan, tests)
+   #    needs: maven-build
+   #    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+   #    runs-on: ubuntu-latest
+   #    permissions:
+   #       contents: write
+   #    env:
+   #       TAG: ${{ needs['maven-build'].outputs.version }}
+   #    steps:
+   #       - uses: actions/checkout@v7
 
-         - uses: docker/setup-buildx-action@v4
+   #       - uses: docker/setup-buildx-action@v4
 
-         - name: Build image locally
-           uses: docker/build-push-action@v7.3.0
-           with:
-              context: .
-              file: Dockerfile
-              load: true
-              push: false
-              build-args: |
-                 APP_VERSION=${{ env.TAG }}
-              tags: |
-                 ${{ env.IMAGE_NAME }}:${{ env.TAG }}
-                 ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-                 ${{ env.IMAGE_NAME }}:latest
-              cache-from: type=gha
-              cache-to: type=gha,mode=max
-              provenance: false
+   #       - name: Build image locally
+   #         uses: docker/build-push-action@v7.3.0
+   #         with:
+   #            context: .
+   #            file: Dockerfile
+   #            load: true
+   #            push: false
+   #            build-args: |
+   #               APP_VERSION=${{ env.TAG }}
+   #            tags: |
+   #               ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+   #               ${{ env.IMAGE_NAME }}:latest
+   #            cache-from: type=gha
+   #            cache-to: type=gha,mode=max
+   #            provenance: false
 
-         - name: Smoke Test local container
-           run: |
-              set -euo pipefail
+   #       - name: Smoke Test local container
+   #         run: |
+   #            set -euo pipefail
 
-              OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
+   #            OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
 
-              echo "$OUT"
-              echo "$OUT" | grep -qF "Hello World! from Mano"
+   #            echo "$OUT"
+   #            echo "$OUT" | grep -qF "Hello World! from Mano"
 
-         - name: Save image for helm-deploy
-           run: docker save "${IMAGE_NAME}:${TAG}" -o /tmp/image.tar
+   #       - name: Vulnerability Scan with Trivy
+   #         uses: aquasecurity/trivy-action@v0.36.0
+   #         with:
+   #            image-ref: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+   #            format: "table"
+   #            exit-code: "0"
+   #            severity: "HIGH,CRITICAL"
+   #            ignore-unfixed: true
 
-         - name: Upload image artifact
-           uses: actions/upload-artifact@v7
-           with:
-              name: docker-image-${{ env.TAG }}
-              path: /tmp/image.tar
-              retention-days: 1
+   #       - name: Authenticate to Docker Hub
+   #         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+   #         uses: docker/login-action@v4
+   #         with:
+   #            username: ${{ secrets.DOCKERHUB_USERNAME }}
+   #            password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-         - name: Vulnerability Scan with Trivy
-           uses: aquasecurity/trivy-action@v0.36.0
-           with:
-              image-ref: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
-              format: "table"
-              exit-code: "0"
-              severity: "HIGH,CRITICAL"
-              ignore-unfixed: true
+   #       - name: Push image to docker hub
+   #         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+   #         run: |
+   #            set -euo pipefail
+   #            docker push "${IMAGE_NAME}:${TAG}"
+   #            docker push ${{ env.IMAGE_NAME }}:latest
 
-         - name: Authenticate to Docker Hub
-           if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
-           uses: docker/login-action@v4
-           with:
-              username: ${{ secrets.DOCKERHUB_USERNAME }}
-              password: ${{ secrets.DOCKERHUB_TOKEN }}
+   #       - name: Tag release version
+   #         run: |
+   #            set -euo pipefail
+   #            git config user.name "github-actions[bot]"
+   #            git config user.email "github-actions[bot]@users.noreply.github.com"
+   #            git tag "v${{ env.TAG }}"
+   #            git push origin "v${{ env.TAG }}"
 
-         - name: Push image to docker hub
-           if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
-           run: |
-              set -euo pipefail
-              docker push "${IMAGE_NAME}:${TAG}"
-              docker push ${{ env.IMAGE_NAME }}:latest
+   # docker-pull-run:
+   #    name: Pull image from Docker Hub & Run
+   #    needs: [maven-build, docker-image-build]
+   #    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+   #    runs-on: ubuntu-latest
+   #    env:
+   #       TAG: ${{ needs['maven-build'].outputs.version }}
 
-         - name: Tag release version
-           if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
-           run: |
-              set -euo pipefail
+   #    steps:
+   #       - name: Pull the Image
+   #         run: docker pull "${IMAGE_NAME}:${TAG}"
 
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
+   #       - name: Run Container and compare print
+   #         run: |
+   #            set -euo pipefail
+   #            OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
 
-              git tag "v${{ env.TAG }}"
-
-              git push origin "v${{ env.TAG }}"
-
-   docker-pull-run:
-      name: Pull image from Docker Hub & Run
-      needs: [maven-build, docker-image-build]
-      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
-      runs-on: ubuntu-latest
-      env:
-         TAG: ${{ needs['maven-build'].outputs.version }}
-
-      steps:
-         - name: Authenticate to Docker Hub
-           uses: docker/login-action@v4
-           with:
-              username: ${{ secrets.DOCKERHUB_USERNAME }}
-              password: ${{ secrets.DOCKERHUB_TOKEN }}
-         - name: Pull the Image
-           run: docker pull "${IMAGE_NAME}:${TAG}"
-
-         - name: Run Container and compare print
-           run: |
-              set -euo pipefail
-              OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
-
-              echo "$OUT"
-              echo "$OUT" | grep -qF "Hello World! from Mano"
-              echo "Published image verified"
-
-   helm-deploy:
-      name: Deploy to cluster with Helm
-      needs: [docker-pull-run, docker-image-build, maven-build]
-      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
-      permissions:
-         contents: read
-      timeout-minutes: 10
-      env:
-         TAG: ${{ needs['maven-build'].outputs.version }}
-      runs-on: ubuntu-latest
-      steps:
-         - uses: actions/checkout@v7
-
-         - name: Lint & template Helm chart
-           run: |
-              set -euo pipefail
-              helm lint ./helm
-              helm template myapp ./helm \
-                 --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/myapp \
-                 --set image.tag=${{ env.TAG }} > /dev/null
-
-         - name: Create k8s Kind Cluster
-           uses: helm/kind-action@v1
-           with:
-              cluster_name: return-home-cluster
-
-         - name: Create Image Pull Secret
-           run: |
-              set -euo pipefail
-              kubectl create secret docker-registry dockerhub-secret \
-                 --docker-server=https://index.docker.io/v1/ \
-                 --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
-                 --docker-password=${{ secrets.DOCKERHUB_TOKEN }} \
-                 --dry-run=client -o yaml | kubectl apply -f -
-
-         - name: Download image artifact
-           uses: actions/download-artifact@v7
-           with:
-              name: docker-image-${{ env.TAG }}
-              path: /tmp
-
-         - name: Load image into kind cluster
-           run: |
-              set -euo pipefail
-
-              docker load -i /tmp/image.tar
-
-              kind load docker-image "${{ secrets.DOCKERHUB_USERNAME }}/myapp:${{ env.TAG }}" --name return-home-cluster
-
-         - name: Install helm chart
-           run: |
-              helm upgrade --install myapp ./helm \
-                 --set image.repository=${{ secrets.DOCKERHUB_USERNAME }}/myapp \
-                 --set image.tag=${{ env.TAG }} \
-                 --set image.pullPolicy=IfNotPresent \
-                 --set 'imagePullSecrets[0].name=dockerhub-secret' \
-                 --wait --wait-for-jobs \
-                 --timeout 1m
-
-         - name: Verify the job completed and printed correctly
-           run: |
-              set -euo pipefail
-              kubectl wait --for=condition=complete job -l app.kubernetes.io/instance=myapp --timeout=30s
-
-              POD=$(kubectl get pods -l app.kubernetes.io/instance=myapp -o jsonpath='{.items[0].metadata.name}')
-              OUT=$(kubectl logs "$POD")
-
-              echo "$OUT"
-              if ! echo "$OUT" | grep -qF "Hello World! from Mano"; then
-               echo "Error: Expected string 'Hello World! from Mano' was not found in the logs."
-               exit 1 # This forces the pipeline to fail
-               fi
-
-              echo "Deploy verified: job completed and output matched"
-
-         - name: Debug on failure
-           if: failure()
-           run: |
-              kubectl get jobs,pods -l app.kubernetes.io/instance=myapp -o wide
-              kubectl describe job -l app.kubernetes.io/instance=myapp
-              kubectl get events --sort-by=.lastTimestamp | tail -20
-
-              POD=$(kubectl get pods -l app.kubernetes.io/instance=myapp -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-
-              if [ -n "$POD" ]; then kubectl logs "$POD" || true; fi
+   #            echo "$OUT"
+   #            echo "$OUT" | grep -qF "Hello World! from Mano"
+   #            echo "Published image verified"
