@@ -138,81 +138,33 @@ jobs:
               if-no-files-found: warn
               retention-days: 7
 
-   # maven-build:
-   #    name: Build, Test & Scan
-   #    runs-on: ubuntu-latest
-   #    outputs:
-   #       version: ${{ steps.version.outputs.version }}
+   docker-image-build:
+      name: Docker Image (Build, Scan , Push)
+      needs: [maven-build, static-analysis]
+      runs-on: ubuntu-latest
+      timeout-minutes: 20
+      permissions:
+         contents: write #tag push
+      env:
+         TAG: ${{ needs['maven-build'].outputs.version }}
+      steps:
+         - uses: actions/checkout@v7
 
-   #    steps:
-   #       # Checkout
-   #       - name: Checkout Source Code
-   #         uses: actions/checkout@v7
-   #         with:
-   #            fetch-depth: 0
-
-   #       - name: SAST scan with Semgrep
-   #         run: |
-   #            set -euo pipefail
-   #            docker run --rm -v "${{ github.workspace }}:/src" -w /src semgrep/semgrep \
-   #            semgrep scan --config auto --severity ERROR --severity WARNING
-
-   #       - name: Setup JDK ${{ env.JAVA_VERSION }}
-   #         uses: actions/setup-java@v6
-   #         with:
-   #            java-version: ${{ env.JAVA_VERSION }}
-   #            distribution: ${{ env.JAVA_DISTRIBUTION }}
-   #            cache: maven
-
-   #       - name: Resolve next version
-   #         id: version
-   #         working-directory: ${{ env.WORKING_DIR }}
-   #         run: |
-   #            set -euo pipefail
-   #            git fetch --tags --force --quiet
-
-   #            # Extract baseline from pom.xml
-   #            BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
-   #            SERIES=$(echo "$BASE" | cut -d. -f1,2)
-
-   #            # Match latest git tag in the current release series
-   #            LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
-
-   #            if [ -z "$LAST" ]; then
-   #            VERSION="${SERIES}.1"
-   #            else
-   #            VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
-   #            fi
-
-   #            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-   #            # Generate audit log in Step Summary
-   #            {
-   #            echo "### Version \`${VERSION}\`"
-   #            echo ""
-   #            echo "| pom base | last tag | next |"
-   #            echo "|---|---|---|"
-   #            echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
-   #            } >> "$GITHUB_STEP_SUMMARY"
-
-   #       - name: Stamp versiion into the POM
-   #         working-directory: ${{ env.WORKING_DIR }}
-   #         run: |
-   #            mvn -B -ntp versions:set \
-   #            -DnewVersion="${{ steps.version.outputs.version }}" \
-   #            -DgenerateBackupPoms=false
-
-   #       - name: Compile and run unit Tests
-   #         working-directory: ${{ env.WORKING_DIR }}
-   #         run: mvn -B -ntp clean verify
-
-   #       - name: Upload JAR
-   #         uses: actions/upload-artifact@v7
-   #         with:
-   #            name: myapp-${{ steps.version.outputs.version }}
-   #            path: myapp/target/myapp-${{ steps.version.outputs.version }}.jar
-   #            if-no-files-found: error
-   #            retention-days: 30
+         - name: Build Image locally
+           uses: docker/build-push-action@v7.3.0
+           with:
+              context: .
+              file: Dockerfile
+              load: true
+              pull: false
+              build-args: |
+                 APP_VERSION=${{ env.TAG }}
+              tags: |
+                 ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+                 ${{ env.IMAGE_NAME }}:latest
+              cache-from: type=gha
+              cache-to: type=gha,mode=max
+              provenance: false
 
    # docker-image-build:
    #    name: Docker Image (build, scan, tests)
