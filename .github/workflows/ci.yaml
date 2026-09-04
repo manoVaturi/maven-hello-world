@@ -85,7 +85,11 @@ jobs:
               helm lint "${HELM_CHART_DIR}" --strict
 
          - name: Render templates
-           run: helm template myapp "${{ env.HELM_CHART_DIR }}" --output-dir rendered
+           run: |
+              helm template myapp "${{ env.HELM_CHART_DIR }}" \
+                 --set image.repository=validation-placeholder \
+                 --set image.tag=0.0.0 \
+                 --output-dir rendered
 
          - name: Validate rendered manifests against k8s schema
            uses: docker://ghcr.io/yannh/kubeconform:latest
