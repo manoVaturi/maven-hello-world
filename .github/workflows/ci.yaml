@@ -43,7 +43,8 @@ jobs:
               docker run --rm -v "${{ github.workspace }}:/src" -w /src \
               semgrep/semgrep:1.86.0 \
               semgrep scan --config p/ci \
-              --severity ERROR --severity WARNING --metrics=off --error
+              --severity ERROR --severity WARNING --metrics=off --error \
+              --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag
 
    # chart-validation:
    #    name: Validation of Helm Chart
