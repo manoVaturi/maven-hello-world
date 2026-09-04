@@ -89,6 +89,55 @@ jobs:
               distribution: ${{ env.JAVA_DISTRIBUTION }}
               cache: maven
 
+         - name: Resolve next version
+           id: version
+           working-directory: ${{ env.WORKING_DIR }}
+           run: |
+              set -euo pipefail
+              git fetch --tags --force --quiet
+
+              BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
+              SERIES=$(echo "$BASE" | cut -d. -f1,2)
+
+              LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
+
+              if [ -z "$LAST" ]; then
+                 VERSION="${SERIES}.0"
+              else
+                 VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
+              fi
+
+              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+              {
+                 echo "### Version \`${VERSION}\`"
+                 echo ""
+                 echo "| pom base | last tag | next |"
+                 echo "|---|---|---|"
+                 echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
+              } >> "$GITHUB_STEP_SUMMARY"
+
+         - name: Stamp version into the POM
+           working-directory: ${{ env.WORKING_DIR }}
+           run: |
+              set -euo pipefail
+              mvn -B -ntp org.codehaus.mojo:versions-maven-plugin:2.16.2:set \
+                 -DnewVersion="${{ steps.version.outputs.version }}" \
+                 -DgenerateBackupPoms=false
+
+         - name: Compile and run unit tests
+           working-directory: ${{ env.WORKING_DIR }}
+           run: mvn -B -ntp clean verify
+
+         - name: Upload test reports
+           if: always()
+           uses: actions/upload-artifact@v7
+           with:
+              name: test-reports-${{ steps.version.outputs.version }}
+              path: myapp/target/surefire-reports/
+              if-no-files-found: warn
+              retention-days: 7
+
    # maven-build:
    #    name: Build, Test & Scan
    #    runs-on: ubuntu-latest
