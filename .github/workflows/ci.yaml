@@ -74,8 +74,8 @@ jobs:
       name: Build, Test & Scan
       runs-on: ubuntu-latest
       timeout-minutes: 20
-      outputs:
-         version: ${{ steps.version.outputs.version }}
+      # outputs:
+      #    version: ${{ steps.version.outputs.version }}
       steps:
          - name: Checkout Source Code
            uses: actions/checkout@v7
