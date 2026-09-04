@@ -3,8 +3,6 @@ package com.myapp;
 /**
  * Hello world!
  *
- *s
- *
  */
 public class App
 {

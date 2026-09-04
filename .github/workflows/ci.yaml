@@ -172,15 +172,13 @@ jobs:
               if-no-files-found: warn
               retention-days: 7
 
-   # build, scan and push the image, only on master or manual run, and only if app code actually changed
+   # build, smoke-test and scan the image. runs pre-merge too, so a broken image never lands on master
    docker-image-build:
-      name: Docker Image (Build, Scan , Push)
-      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.changes.outputs.app == 'true')
+      name: Docker Image (Build, Scan)
+      if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.app == 'true'
       needs: [changes, maven-build, static-analysis]
       runs-on: ubuntu-latest
       timeout-minutes: 20
-      permissions:
-         contents: write #tag push
       env:
          TAG: ${{ needs['maven-build'].outputs.version }}
       steps:
@@ -232,70 +230,11 @@ jobs:
               path: /tmp/image.tar
               retention-days: 1
 
-         - name: Authenticate to Docker Hub
-           uses: docker/login-action@v4
-           with:
-              username: ${{ secrets.DOCKERHUB_USERNAME }}
-              password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-         - name: Push image to Docker Hub
-           run: |
-              set -euo pipefail
-
-              docker push "${IMAGE_NAME}:${TAG}"
-              docker push "${IMAGE_NAME}:latest"
-
-               {
-                  echo "### Published"
-                  echo ""
-                  echo "| field | value |"
-                  echo "|---|---|"
-                  echo "| tag | \`${TAG}\` |"
-                  echo "| commit tag | \`sha-${GITHUB_SHA}\` |"
-               } >> "$GITHUB_STEP_SUMMARY"
-
-         - name: Tag release version
-           if: github.event_name != 'workflow_dispatch' # manual runs reuse 1.0.0, tag would already exist
-           run: |
-              set -euo pipefail
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git tag "v${TAG}"
-              git push origin "v${TAG}"
-
-   # make sure what we pushed actually works, pull it back and run it
-   docker-pull-run:
-      name: Verify pushed image
-      needs: [maven-build, docker-image-build]
-      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
-      runs-on: ubuntu-latest
-      timeout-minutes: 10
-      env:
-         TAG: ${{ needs['maven-build'].outputs.version }}
-      steps:
-         - name: Authenticate to Docker Hub
-           uses: docker/login-action@v4
-           with:
-              username: ${{ secrets.DOCKERHUB_USERNAME }}
-              password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-         - name: Pull image and run
-           run: |
-              set -euo pipefail
-
-               docker pull "${IMAGE_NAME}:${TAG}"
-
-               OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
-
-               echo "$OUT"
-               echo "$OUT" | grep -qF "${{ env.APP_MESSAGE }}"
-               echo "Published image verified at ${TAG}"
-
-   # spin up throwaway kind cluster and deploy with helm, local image only
+   # spin up throwaway kind cluster and deploy with helm, local image only. runs pre-merge too
    helm-deploy:
       name: Create k8s cluster and deploy app with Helm
-      needs: [maven-build, docker-image-build]
-      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+      needs: [changes, maven-build, docker-image-build]
+      if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.app == 'true'
       runs-on: ubuntu-latest
       timeout-minutes: 15
       permissions:
@@ -368,3 +307,85 @@ jobs:
               kubectl logs -l app.kubernetes.io/instance="${RELEASE}" -n "${NAMESPACE}" --all-containers --tail=200 || true
               kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp || true
               helm status "${RELEASE}" -n "${NAMESPACE}" || true
+
+   # push to Docker Hub and tag the release. only after a real merge to master, never on a PR
+   docker-image-publish:
+      name: Publish image to Docker Hub
+      needs: [maven-build, docker-image-build, helm-deploy]
+      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+      runs-on: ubuntu-latest
+      timeout-minutes: 10
+      permissions:
+         contents: write #tag push
+      env:
+         TAG: ${{ needs['maven-build'].outputs.version }}
+      steps:
+         - uses: actions/checkout@v7
+
+         - name: Download image artifact
+           uses: actions/download-artifact@v7
+           with:
+              name: docker-image-${{ env.TAG }}
+              path: /tmp
+
+         - name: Load image
+           run: docker load -i /tmp/image.tar
+
+         - name: Authenticate to Docker Hub
+           uses: docker/login-action@v4
+           with:
+              username: ${{ secrets.DOCKERHUB_USERNAME }}
+              password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+         - name: Push image to Docker Hub
+           run: |
+              set -euo pipefail
+
+              docker push "${IMAGE_NAME}:${TAG}"
+              docker push "${IMAGE_NAME}:latest"
+
+               {
+                  echo "### Published"
+                  echo ""
+                  echo "| field | value |"
+                  echo "|---|---|"
+                  echo "| tag | \`${TAG}\` |"
+                  echo "| commit tag | \`sha-${GITHUB_SHA}\` |"
+               } >> "$GITHUB_STEP_SUMMARY"
+
+         - name: Tag release version
+           if: github.event_name != 'workflow_dispatch' # manual runs reuse 1.0.0, tag would already exist
+           run: |
+              set -euo pipefail
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag "v${TAG}"
+              git push origin "v${TAG}"
+
+   # make sure what we pushed actually works, pull it back and run it
+   docker-pull-run:
+      name: Verify pushed image
+      needs: [maven-build, docker-image-publish]
+      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+      runs-on: ubuntu-latest
+      timeout-minutes: 10
+      env:
+         TAG: ${{ needs['maven-build'].outputs.version }}
+      steps:
+         - name: Authenticate to Docker Hub
+           uses: docker/login-action@v4
+           with:
+              username: ${{ secrets.DOCKERHUB_USERNAME }}
+              password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+         - name: Pull image and run
+           run: |
+              set -euo pipefail
+
+               docker pull "${IMAGE_NAME}:${TAG}"
+
+               OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
+
+               echo "$OUT"
+               echo "$OUT" | grep -qF "${{ env.APP_MESSAGE }}"
+               echo "Published image verified at ${TAG}"

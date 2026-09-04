@@ -64,9 +64,13 @@ These run on every push, including a WIP feature branch with no PR open yet — 
 
 Earlier this repo tried both `push` and `pull_request` triggers together, with a same-repo-vs-fork guard to avoid double-running. That created two check-runs sharing the identical name `Build, Test & Scan` for one commit (one `success`, one `skipped`) — which GitHub's required-status-check matching resolved inconsistently, occasionally leaving a mergeable PR stuck on "Expected — waiting for status to be reported." Dropping `pull_request` removes the duplicate-name case at the source.
 
-**Publish/deploy path — `docker-image-build`, `docker-pull-run`, `helm-deploy`:**
+**Build + integration test — `docker-image-build`, `helm-deploy`:**
 
-Gated separately, on `event_name == 'push' && ref == 'refs/heads/master'` (a real merge to `master`) or `workflow_dispatch` (manual, for testing on demand). `docker-image-build` additionally requires `needs.changes.outputs.app == 'true'` on the push path — a commit that only touches docs, the workflow file, or the Helm chart shouldn't trigger a version bump and image publish. Manual dispatch skips that check, since testing the pipeline on demand is the whole point of that trigger.
+These run whenever app code actually changed (`needs.changes.outputs.app == 'true'`) — on a feature branch push before a PR even exists, on the PR, and again after merge to `master`. The point: master should never be broken by something a Docker build or a real Helm/Kubernetes deploy would have caught, so both run pre-merge, not just after.
+
+**Publish path — `docker-image-publish`, `docker-pull-run`:**
+
+Gated separately, on `event_name == 'push' && ref == 'refs/heads/master'` (a real merge) or `workflow_dispatch`. `docker-image-publish` needs `docker-image-build` *and* `helm-deploy` to have succeeded first — so even the master-push's own build+integration-test has to pass before anything gets pushed to Docker Hub or tagged. It reuses the image artifact `docker-image-build` already produced in the same workflow run rather than rebuilding, then pushes and creates the git tag. `docker-pull-run` does a separate real pull from Docker Hub afterward as the actual "did the publish work" check.
 
 **Versioning**
 
@@ -78,7 +82,7 @@ The real git tag (`vX.Y.Z`) is only created as the last step of `docker-image-bu
 
 **Docker image stage**
 
-`docker-image-build` builds via buildx, smoke-tests the container (runs it, greps stdout for the expected message), Trivy-scans it (`--exit-code 0`, report-only — doesn't block), `docker save`s it as a workflow artifact for `helm-deploy` to reuse, then logs in and pushes to Docker Hub. `docker-pull-run` does a separate real pull from Docker Hub afterward as the actual "did the publish work" check.
+`docker-image-build` builds via buildx, smoke-tests the container (runs it, greps stdout for the expected message), Trivy-scans it (`--exit-code 0`, report-only — doesn't block), and `docker save`s it as a workflow artifact that both `helm-deploy` and (on master) `docker-image-publish` reuse. Publishing (Docker Hub login + push + git tag) lives entirely in `docker-image-publish`, so a PR build never pushes an image or creates a tag, even though it exercises the exact same build/scan path master will.
 
 **Helm deploy stage**
 
