@@ -49,19 +49,22 @@ Final stage: `gcr.io/distroless/java:8` — ships a non-root user already, ~188M
 
 ## CI pipeline
 
-Runs on `pull_request` into `master`, `push` to any `feature/**` branch, and `workflow_dispatch`.
+Runs on `push` to **any** branch, `pull_request` into `master`, and `workflow_dispatch`.
 
-**Always run, regardless of trigger:**
+**Validation jobs — `changes`, `static-analysis`, `chart-validation`, `maven-build`:**
+
+These run on every push, including a WIP feature branch with no PR open yet — that's the point, you get feedback before you even open a PR, not just once it exists.
+
 - `static-analysis` — hadolint on the Dockerfile, Semgrep SAST (`p/ci` ruleset, `--error` so findings fail the build).
 - `chart-validation` — `helm lint --strict`, `helm template` against a placeholder image (the real one isn't built yet at this point), then `kubeconform` against the actual Kubernetes API schema.
-- `changes` — `dorny/paths-filter` checks whether `myapp/**`, `Dockerfile`, or `.dockerignore` changed. Its output gates `docker-image-build` below; nothing else consumes it yet.
-- `maven-build` — compiles and runs unit tests every time, so a broken build fails fast on any branch.
+- `changes` — `dorny/paths-filter` checks whether `myapp/**`, `Dockerfile`, or `.dockerignore` changed. Its output gates `docker-image-build` below.
+- `maven-build` — compiles and runs unit tests, so a broken build fails fast on any branch.
 
-**Publish/deploy path — currently manual only:**
+Each of these four carries `if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository`. Reason: `push` already fires for every commit on any branch, including one with an open same-repo PR — without this guard, that commit would trigger the same checks twice (once for `push`, once for `pull_request: synchronize`). The guard skips the `pull_request`-triggered run whenever a `push`-triggered run for that same commit already exists (i.e. it's not a fork), and only lets `pull_request` actually run the checks for a PR coming from a fork — a fork's commits never generate a `push` event on this repo, so that's the only case still needing it. Branch protection's required check still resolves correctly either way, since GitHub matches required status checks by commit SHA across all workflow runs, not by which event triggered them.
 
-The `push` trigger's branch filter is `feature/**`, and `master` is deliberately left out of it for now — a merge into `master` does **not** currently fire a `push` event, and `docker-image-build`/`docker-pull-run`/`helm-deploy` all gate on `event_name == 'push' && ref == 'refs/heads/master'`. So in practice, right now the only way to run the build → push → deploy path is `workflow_dispatch` ("Run workflow" in the Actions tab, or `gh workflow run ci.yaml`). Re-enabling `master` in the push trigger (uncomment `ci.yaml:5`) would turn this back into a real trunk-based release flow — not done yet, so don't rely on merging to `master` alone to ship an image.
+**Publish/deploy path — `docker-image-build`, `docker-pull-run`, `helm-deploy`:**
 
-`docker-image-build` additionally gates on `needs.changes.outputs.app == 'true'` for the push path (not for manual dispatch, which always runs — that's the point of testing on demand) — a commit that only touches docs, the workflow file, or the Helm chart shouldn't trigger a version bump and image publish.
+Gated separately, on `event_name == 'push' && ref == 'refs/heads/master'` (a real merge to `master`) or `workflow_dispatch` (manual, for testing on demand). `docker-image-build` additionally requires `needs.changes.outputs.app == 'true'` on the push path — a commit that only touches docs, the workflow file, or the Helm chart shouldn't trigger a version bump and image publish. Manual dispatch skips that check, since testing the pipeline on demand is the whole point of that trigger.
 
 **Versioning**
 

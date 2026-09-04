@@ -1,7 +1,6 @@
 name: myapp CI Pipeline
 on:
    push:
-      branches: [master]
       paths-ignore: ["**.md", ".gitignore"]
    pull_request:
       branches: [master]
@@ -27,6 +26,8 @@ jobs:
    # Check if there any changes in the app code\dockerfile or chart
    changes:
       name: Detect App Code changes
+      # skip on a same-repo PR, push already covers that commit. forks dont push here, so still need pull_request for those
+      if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
       runs-on: ubuntu-latest
       timeout-minutes: 5
       outputs:
@@ -50,6 +51,7 @@ jobs:
    # Shift left SAST
    static-analysis:
       name: Static Analysis (SAST, Dockerfile)
+      if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
       runs-on: ubuntu-latest
       timeout-minutes: 15
       steps:
@@ -73,6 +75,7 @@ jobs:
    # Validation of cutom helm chart
    chart-validation:
       name: Validation of Helm Chart
+      if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
       runs-on: ubuntu-latest
       timeout-minutes: 10
       steps:
@@ -102,6 +105,7 @@ jobs:
    # Maven build, tests and scans before packing to a container
    maven-build:
       name: Build, Test & Scan
+      if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
       runs-on: ubuntu-latest
       timeout-minutes: 20
       outputs:
