@@ -49,7 +49,9 @@ Final stage: `gcr.io/distroless/java:8` — ships a non-root user already, ~188M
 
 ## CI pipeline
 
-Runs on `push` to **any** branch, `pull_request` into `master`, and `workflow_dispatch`.
+Runs on `push` to **any** branch, and `workflow_dispatch`. No `pull_request` trigger — `push` already fires for every commit, PR or not, so a `pull_request` trigger would just re-run the exact same checks a second time for the same commit.
+
+That has one real cost: a fork's commits never generate a `push` event on this repo, so a fork-submitted PR would get no checks at all. This is a solo repo with no outside contributors, so that's an acceptable trade, not an oversight — revisit if that changes.
 
 **Validation jobs — `changes`, `static-analysis`, `chart-validation`, `maven-build`:**
 
@@ -58,9 +60,9 @@ These run on every push, including a WIP feature branch with no PR open yet — 
 - `static-analysis` — hadolint on the Dockerfile, Semgrep SAST (`p/ci` ruleset, `--error` so findings fail the build).
 - `chart-validation` — `helm lint --strict`, `helm template` against a placeholder image (the real one isn't built yet at this point), then `kubeconform` against the actual Kubernetes API schema.
 - `changes` — `dorny/paths-filter` checks whether `myapp/**`, `Dockerfile`, or `.dockerignore` changed. Its output gates `docker-image-build` below.
-- `maven-build` — compiles and runs unit tests, so a broken build fails fast on any branch.
+- `maven-build` — compiles and runs unit tests, so a broken build fails fast on any branch. This is also the required branch-protection check (`Build, Test & Scan`, matching the job's `name:` field — the check name GitHub reports, not the YAML job id) — it's why `maven-build` deliberately never gates on `needs.changes.outputs.app`: a required check that's conditionally skipped never gets a second run to report success for that commit, so it'd block merging forever on any doc-only or chart-only change.
 
-Each of these four carries `if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository`. Reason: `push` already fires for every commit on any branch, including one with an open same-repo PR — without this guard, that commit would trigger the same checks twice (once for `push`, once for `pull_request: synchronize`). The guard skips the `pull_request`-triggered run whenever a `push`-triggered run for that same commit already exists (i.e. it's not a fork), and only lets `pull_request` actually run the checks for a PR coming from a fork — a fork's commits never generate a `push` event on this repo, so that's the only case still needing it. Branch protection's required check still resolves correctly either way, since GitHub matches required status checks by commit SHA across all workflow runs, not by which event triggered them.
+Earlier this repo tried both `push` and `pull_request` triggers together, with a same-repo-vs-fork guard to avoid double-running. That created two check-runs sharing the identical name `Build, Test & Scan` for one commit (one `success`, one `skipped`) — which GitHub's required-status-check matching resolved inconsistently, occasionally leaving a mergeable PR stuck on "Expected — waiting for status to be reported." Dropping `pull_request` removes the duplicate-name case at the source.
 
 **Publish/deploy path — `docker-image-build`, `docker-pull-run`, `helm-deploy`:**
 
