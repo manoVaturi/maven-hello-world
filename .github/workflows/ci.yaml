@@ -22,8 +22,31 @@ env:
    JAVA_DISTRIBUTION: "temurin"
    WORKING_DIR: "myapp"
    HELM_CHART_DIR: "helm"
+   APP_MESSAGE: "Hello World! from Mano"
 
 jobs:
+   changes:
+      name: Detect App Code changes
+      runs-on: ubuntu-latest
+      timeout-minutes: 5
+      outputs:
+         app: ${{ steps.filter.outputs.app }}
+         chart: ${{ steps.filter.outputs.chart }}
+      steps:
+         - uses: actions/checkout@v7
+
+         - name: Check for app/ chart changes
+           id: filter
+           uses: dorny/paths-filter@v4.0.3
+           with:
+              filters: |
+                 app:
+                   - 'myapp/**'
+                   - 'Dockerfile'
+                   - '.dockerignore'
+                 chart:
+                   - 'helm/**'
+
    static-analysis:
       name: Static Analysis (SAST, Dockerfile)
       runs-on: ubuntu-latest
@@ -96,15 +119,22 @@ jobs:
               set -euo pipefail
               git fetch --tags --force --quiet
 
-              BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
-              SERIES=$(echo "$BASE" | cut -d. -f1,2)
-
-              LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
-
-              if [ -z "$LAST" ]; then
-                 VERSION="${SERIES}.0"
+              if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+                 BASE="manual"
+                 LAST=""
+                 VERSION="1.0.0"
+                 echo "Manual trigger - using fixed test version ${VERSION}"
               else
-                 VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
+                 BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
+                 SERIES=$(echo "$BASE" | cut -d. -f1,2)
+
+                 LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
+
+                 if [ -z "$LAST" ]; then
+                    VERSION="${SERIES}.0"
+                 else
+                    VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
+                 fi
               fi
 
               echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -138,169 +168,110 @@ jobs:
               if-no-files-found: warn
               retention-days: 7
 
-   # maven-build:
-   #    name: Build, Test & Scan
-   #    runs-on: ubuntu-latest
-   #    outputs:
-   #       version: ${{ steps.version.outputs.version }}
+   docker-image-build:
+      name: Docker Image (Build, Scan , Push)
+      # needs: [changes, maven-build, static-analysis, chart-validation]
+      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+      needs: [maven-build, static-analysis]
+      runs-on: ubuntu-latest
+      timeout-minutes: 20
+      permissions:
+         contents: write #tag push
+      env:
+         TAG: ${{ needs['maven-build'].outputs.version }}
+      steps:
+         - uses: actions/checkout@v7
 
-   #    steps:
-   #       # Checkout
-   #       - name: Checkout Source Code
-   #         uses: actions/checkout@v7
-   #         with:
-   #            fetch-depth: 0
+         - uses: docker/setup-buildx-action@v4
 
-   #       - name: SAST scan with Semgrep
-   #         run: |
-   #            set -euo pipefail
-   #            docker run --rm -v "${{ github.workspace }}:/src" -w /src semgrep/semgrep \
-   #            semgrep scan --config auto --severity ERROR --severity WARNING
+         - name: Build Image locally
+           uses: docker/build-push-action@v7.3.0
+           with:
+              context: .
+              file: Dockerfile
+              load: true
+              pull: false
+              build-args: |
+                 APP_VERSION=${{ env.TAG }}
+              tags: |
+                 ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+                 ${{ env.IMAGE_NAME }}:latest
+              cache-from: type=gha
+              cache-to: type=gha,mode=max
+              provenance: false
 
-   #       - name: Setup JDK ${{ env.JAVA_VERSION }}
-   #         uses: actions/setup-java@v6
-   #         with:
-   #            java-version: ${{ env.JAVA_VERSION }}
-   #            distribution: ${{ env.JAVA_DISTRIBUTION }}
-   #            cache: maven
+         - name: Smoke test local Container
+           run: |
+              set -euo pipefail
 
-   #       - name: Resolve next version
-   #         id: version
-   #         working-directory: ${{ env.WORKING_DIR }}
-   #         run: |
-   #            set -euo pipefail
-   #            git fetch --tags --force --quiet
+              OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
 
-   #            # Extract baseline from pom.xml
-   #            BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
-   #            SERIES=$(echo "$BASE" | cut -d. -f1,2)
+              echo "$OUT"
+              echo "$OUT" | grep -qF "${{ env.APP_MESSAGE }}"
 
-   #            # Match latest git tag in the current release series
-   #            LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
+         - name: Vulnerability image scan with Trivy
+           uses: aquasecurity/trivy-action@v0.36.0
+           with:
+              image-ref: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+              format: "table"
+              exit-code: "0"
+              severity: "HIGH,CRITICAL"
+              ignore-unfixed: true
 
-   #            if [ -z "$LAST" ]; then
-   #            VERSION="${SERIES}.1"
-   #            else
-   #            VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
-   #            fi
+         - name: Authenticate to Docker Hub
+           uses: docker/login-action@v4
+           with:
+              username: ${{ secrets.DOCKERHUB_USERNAME }}
+              password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-   #            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+         - name: Push image to Docker Hub
+           run: |
+              set -euo pipefail
 
-   #            # Generate audit log in Step Summary
-   #            {
-   #            echo "### Version \`${VERSION}\`"
-   #            echo ""
-   #            echo "| pom base | last tag | next |"
-   #            echo "|---|---|---|"
-   #            echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
-   #            } >> "$GITHUB_STEP_SUMMARY"
+              docker push "${IMAGE_NAME}:${TAG}"
+              docker push "${IMAGE_NAME}:latest"
 
-   #       - name: Stamp versiion into the POM
-   #         working-directory: ${{ env.WORKING_DIR }}
-   #         run: |
-   #            mvn -B -ntp versions:set \
-   #            -DnewVersion="${{ steps.version.outputs.version }}" \
-   #            -DgenerateBackupPoms=false
+               {
+                  echo "### Published"
+                  echo ""
+                  echo "| field | value |"
+                  echo "|---|---|"
+                  echo "| tag | \`${TAG}\` |"
+                  echo "| commit tag | \`sha-${GITHUB_SHA}\` |"
+               } >> "$GITHUB_STEP_SUMMARY"
 
-   #       - name: Compile and run unit Tests
-   #         working-directory: ${{ env.WORKING_DIR }}
-   #         run: mvn -B -ntp clean verify
+         - name: Tag release version
+           if: github.event_name != 'workflow_dispatch'
+           run: |
+              set -euo pipefail
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag "v${TAG}"
+              git push origin "v${TAG}"
 
-   #       - name: Upload JAR
-   #         uses: actions/upload-artifact@v7
-   #         with:
-   #            name: myapp-${{ steps.version.outputs.version }}
-   #            path: myapp/target/myapp-${{ steps.version.outputs.version }}.jar
-   #            if-no-files-found: error
-   #            retention-days: 30
+   docker-pull-run:
+      name: Verify pushed image
+      needs: [maven-build, docker-image-build]
+      if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+      runs-on: ubuntu-latest
+      timeout-minutes: 10
+      env:
+         TAG: ${{ needs['maven-build'].outputs.version }}
+      steps:
+         - name: Authenticate to Docker Hub
+           uses: docker/login-action@v4
+           with:
+              username: ${{ secrets.DOCKERHUB_USERNAME }}
+              password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-   # docker-image-build:
-   #    name: Docker Image (build, scan, tests)
-   #    needs: maven-build
-   #    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-   #    runs-on: ubuntu-latest
-   #    permissions:
-   #       contents: write
-   #    env:
-   #       TAG: ${{ needs['maven-build'].outputs.version }}
-   #    steps:
-   #       - uses: actions/checkout@v7
+         - name: Pull image and run
+           run: |
+              set -euo pipefail
 
-   #       - uses: docker/setup-buildx-action@v4
+               docker pull "${IMAGE_NAME}:${TAG}"
 
-   #       - name: Build image locally
-   #         uses: docker/build-push-action@v7.3.0
-   #         with:
-   #            context: .
-   #            file: Dockerfile
-   #            load: true
-   #            push: false
-   #            build-args: |
-   #               APP_VERSION=${{ env.TAG }}
-   #            tags: |
-   #               ${{ env.IMAGE_NAME }}:${{ env.TAG }}
-   #               ${{ env.IMAGE_NAME }}:latest
-   #            cache-from: type=gha
-   #            cache-to: type=gha,mode=max
-   #            provenance: false
+               OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
 
-   #       - name: Smoke Test local container
-   #         run: |
-   #            set -euo pipefail
-
-   #            OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
-
-   #            echo "$OUT"
-   #            echo "$OUT" | grep -qF "Hello World! from Mano"
-
-   #       - name: Vulnerability Scan with Trivy
-   #         uses: aquasecurity/trivy-action@v0.36.0
-   #         with:
-   #            image-ref: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
-   #            format: "table"
-   #            exit-code: "0"
-   #            severity: "HIGH,CRITICAL"
-   #            ignore-unfixed: true
-
-   #       - name: Authenticate to Docker Hub
-   #         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-   #         uses: docker/login-action@v4
-   #         with:
-   #            username: ${{ secrets.DOCKERHUB_USERNAME }}
-   #            password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-   #       - name: Push image to docker hub
-   #         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-   #         run: |
-   #            set -euo pipefail
-   #            docker push "${IMAGE_NAME}:${TAG}"
-   #            docker push ${{ env.IMAGE_NAME }}:latest
-
-   #       - name: Tag release version
-   #         run: |
-   #            set -euo pipefail
-   #            git config user.name "github-actions[bot]"
-   #            git config user.email "github-actions[bot]@users.noreply.github.com"
-   #            git tag "v${{ env.TAG }}"
-   #            git push origin "v${{ env.TAG }}"
-
-   # docker-pull-run:
-   #    name: Pull image from Docker Hub & Run
-   #    needs: [maven-build, docker-image-build]
-   #    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-   #    runs-on: ubuntu-latest
-   #    env:
-   #       TAG: ${{ needs['maven-build'].outputs.version }}
-
-   #    steps:
-   #       - name: Pull the Image
-   #         run: docker pull "${IMAGE_NAME}:${TAG}"
-
-   #       - name: Run Container and compare print
-   #         run: |
-   #            set -euo pipefail
-   #            OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
-
-   #            echo "$OUT"
-   #            echo "$OUT" | grep -qF "Hello World! from Mano"
-   #            echo "Published image verified"
+               echo "$OUT"
+               echo "$OUT" | grep -qF "${{ env.APP_MESSAGE }}"
+               echo "Published image verified at ${TAG}"
