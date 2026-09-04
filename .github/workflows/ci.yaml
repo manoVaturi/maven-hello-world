@@ -251,7 +251,7 @@ jobs:
          - uses: azure/setup-helm@v4
 
          - name: Create k8s Kind Cluster
-           uses: helm/kind-action@v1
+           uses: helm/kind-action@v1.15.0
            with:
               cluster_name: return-home-cluster
 
@@ -342,7 +342,6 @@ jobs:
               set -euo pipefail
 
               docker push "${IMAGE_NAME}:${TAG}"
-              docker push "${IMAGE_NAME}:latest"
 
                {
                   echo "### Published"
