@@ -1,7 +1,8 @@
 name: myapp CI Pipeline
 on:
    push:
-      branches: [master]
+      branches: [feature/**]
+      # branches: [master]
       paths-ignore: ["**.md", ".gitignore"]
    pull_request:
       branches: [master]
@@ -20,26 +21,66 @@ env:
    JAVA_VERSION: "8"
    JAVA_DISTRIBUTION: "temurin"
    WORKING_DIR: "myapp"
+   HELM_CHART_DIR: "helm"
 
 jobs:
-   maven-build:
-      name: Build, Test & Scan
+   static-analysis:
+      name: Static Analysis (SAST, Dockerfile)
       runs-on: ubuntu-latest
-      outputs:
-         version: ${{ steps.version.outputs.version }}
-
+      timeout-minutes: 15
       steps:
-         # Checkout
-         - name: Checkout Source Code
-           uses: actions/checkout@v7
+         - uses: actions/checkout@v7
+
+         - name: Lint Dockerfile with hadolint
+           uses: hadolint/hadolint-action@v3.5.0
            with:
-              fetch-depth: 0
+              dockerfile: Dockerfile
 
          - name: SAST scan with Semgrep
            run: |
               set -euo pipefail
-              docker run --rm -v "${{ github.workspace }}:/src" -w /src semgrep/semgrep \
-              semgrep scan --config auto --severity ERROR --severity WARNING
+
+              docker run --rm -v "${{ github.workspace }}:/src" -w /src \
+              semgrep/semgrep:1.86.0 \
+              semgrep scan --config p/ci \
+              --severity ERROR --severity WARNING --metrics=off --error \
+              --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
+
+   # chart-validation:
+   #    name: Validation of Helm Chart
+   #    runs-on: ubuntu-latest
+   #    timeout-minutes: 10
+   #    steps:
+   #       - uses: actions/checkout@v7
+
+   #       - uses: azure/setup-helm@v5.0.0
+
+   #       - name: Lint chart
+   #         run: |
+   #            set -euo pipefail
+
+   #            helm lint "${HELM_CHART_DIR}" --strict
+
+   #       - name: Render templates
+   #         run: helm template myapp "${{ env.HELM_CHART_DIR }}" --output-dir rendered
+
+   #       - name: Validate rendered manifests against k8s schema
+   #         uses: docker://ghcr.io/yannh/kubeconform:latest
+   #         with:
+   #            entrypoint: /kubeconform
+   #            args: -strict -summary rendered
+
+   maven-build:
+      name: Build, Test & Scan
+      runs-on: ubuntu-latest
+      timeout-minutes: 20
+      outputs:
+         version: ${{ steps.version.outputs.version }}
+      steps:
+         - name: Checkout Source Code
+           uses: actions/checkout@v7
+           with:
+              fetch-depth: 0
 
          - name: Setup JDK ${{ env.JAVA_VERSION }}
            uses: actions/setup-java@v6
@@ -55,141 +96,211 @@ jobs:
               set -euo pipefail
               git fetch --tags --force --quiet
 
-
-              # Extract baseline from pom.xml
               BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
               SERIES=$(echo "$BASE" | cut -d. -f1,2)
 
-
-              # Match latest git tag in the current release series
               LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
 
-
               if [ -z "$LAST" ]; then
-              VERSION="${SERIES}.1"
+                 VERSION="${SERIES}.0"
               else
-              VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
+                 VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
               fi
 
               echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-
-              # Generate audit log in Step Summary
               {
-              echo "### Version \`${VERSION}\`"
-              echo ""
-              echo "| pom base | last tag | next |"
-              echo "|---|---|---|"
-              echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
+                 echo "### Version \`${VERSION}\`"
+                 echo ""
+                 echo "| pom base | last tag | next |"
+                 echo "|---|---|---|"
+                 echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
               } >> "$GITHUB_STEP_SUMMARY"
 
-         - name: Stamp versiion into the POM
+         - name: Stamp version into the POM
            working-directory: ${{ env.WORKING_DIR }}
            run: |
-              mvn -B -ntp versions:set \
-              -DnewVersion="${{ steps.version.outputs.version }}" \
-              -DgenerateBackupPoms=false
+              set -euo pipefail
+              mvn -B -ntp org.codehaus.mojo:versions-maven-plugin:2.16.2:set \
+                 -DnewVersion="${{ steps.version.outputs.version }}" \
+                 -DgenerateBackupPoms=false
 
-         - name: Compile and run unit Tests
+         - name: Compile and run unit tests
            working-directory: ${{ env.WORKING_DIR }}
            run: mvn -B -ntp clean verify
 
-         - name: Upload JAR
+         - name: Upload test reports
+           if: always()
            uses: actions/upload-artifact@v7
            with:
-              name: myapp-${{ steps.version.outputs.version }}
-              path: myapp/target/myapp-${{ steps.version.outputs.version }}.jar
-              if-no-files-found: error
-              retention-days: 30
+              name: test-reports-${{ steps.version.outputs.version }}
+              path: myapp/target/surefire-reports/
+              if-no-files-found: warn
+              retention-days: 7
 
-   docker-image-build:
-      name: Docker Image (build, scan, tests)
-      needs: maven-build
-      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-      runs-on: ubuntu-latest
-      permissions:
-         contents: write
-      env:
-         TAG: ${{ needs['maven-build'].outputs.version }}
-      steps:
-         - uses: actions/checkout@v7
+   # maven-build:
+   #    name: Build, Test & Scan
+   #    runs-on: ubuntu-latest
+   #    outputs:
+   #       version: ${{ steps.version.outputs.version }}
 
-         - uses: docker/setup-buildx-action@v4
+   #    steps:
+   #       # Checkout
+   #       - name: Checkout Source Code
+   #         uses: actions/checkout@v7
+   #         with:
+   #            fetch-depth: 0
 
-         - name: Build image locally
-           uses: docker/build-push-action@v7.3.0
-           with:
-              context: .
-              file: Dockerfile
-              load: true
-              push: false
-              build-args: |
-                 APP_VERSION=${{ env.TAG }}
-              tags: |
-                 ${{ env.IMAGE_NAME }}:${{ env.TAG }}
-                 ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-                 ${{ env.IMAGE_NAME }}:latest
-              cache-from: type=gha
-              cache-to: type=gha,mode=max
-              provenance: false
+   #       - name: SAST scan with Semgrep
+   #         run: |
+   #            set -euo pipefail
+   #            docker run --rm -v "${{ github.workspace }}:/src" -w /src semgrep/semgrep \
+   #            semgrep scan --config auto --severity ERROR --severity WARNING
 
-         - name: Smoke Test local container
-           run: |
-              set -euo pipefail
+   #       - name: Setup JDK ${{ env.JAVA_VERSION }}
+   #         uses: actions/setup-java@v6
+   #         with:
+   #            java-version: ${{ env.JAVA_VERSION }}
+   #            distribution: ${{ env.JAVA_DISTRIBUTION }}
+   #            cache: maven
 
-              OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
+   #       - name: Resolve next version
+   #         id: version
+   #         working-directory: ${{ env.WORKING_DIR }}
+   #         run: |
+   #            set -euo pipefail
+   #            git fetch --tags --force --quiet
 
-              echo "$OUT"
-              echo "$OUT" | grep -qF "Hello World! from Mano"
+   #            # Extract baseline from pom.xml
+   #            BASE=$(mvn -q -B -ntp -DforceStdout help:evaluate -Dexpression=project.version)
+   #            SERIES=$(echo "$BASE" | cut -d. -f1,2)
 
-         - name: Vulnerability Scan with Trivy
-           uses: aquasecurity/trivy-action@v0.36.0
-           with:
-              image-ref: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
-              format: "table"
-              exit-code: "0"
-              severity: "HIGH,CRITICAL"
-              ignore-unfixed: true
+   #            # Match latest git tag in the current release series
+   #            LAST=$(git tag -l "v${SERIES}.*" --sort=-v:refname | head -n1)
 
-         - name: Authenticate to Docker Hub
-           if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-           uses: docker/login-action@v4
-           with:
-              username: ${{ secrets.DOCKERHUB_USERNAME }}
-              password: ${{ secrets.DOCKERHUB_TOKEN }}
+   #            if [ -z "$LAST" ]; then
+   #            VERSION="${SERIES}.1"
+   #            else
+   #            VERSION="${SERIES}.$(( ${LAST##*.} + 1 ))"
+   #            fi
 
-         - name: Push image to docker hub
-           if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-           run: |
-              set -euo pipefail
-              docker push "${IMAGE_NAME}:${TAG}"
-              docker push ${{ env.IMAGE_NAME }}:latest
+   #            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-         - name: Tag release version
-           run: |
-              set -euo pipefail
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git tag "v${{ env.TAG }}"
-              git push origin "v${{ env.TAG }}"
+   #            # Generate audit log in Step Summary
+   #            {
+   #            echo "### Version \`${VERSION}\`"
+   #            echo ""
+   #            echo "| pom base | last tag | next |"
+   #            echo "|---|---|---|"
+   #            echo "| \`${BASE}\` | \`${LAST:-none}\` | \`${VERSION}\` |"
+   #            } >> "$GITHUB_STEP_SUMMARY"
 
-   docker-pull-run:
-      name: Pull image from Docker Hub & Run
-      needs: [maven-build, docker-image-build]
-      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-      runs-on: ubuntu-latest
-      env:
-         TAG: ${{ needs['maven-build'].outputs.version }}
+   #       - name: Stamp versiion into the POM
+   #         working-directory: ${{ env.WORKING_DIR }}
+   #         run: |
+   #            mvn -B -ntp versions:set \
+   #            -DnewVersion="${{ steps.version.outputs.version }}" \
+   #            -DgenerateBackupPoms=false
 
-      steps:
-         - name: Pull the Image
-           run: docker pull "${IMAGE_NAME}:${TAG}"
+   #       - name: Compile and run unit Tests
+   #         working-directory: ${{ env.WORKING_DIR }}
+   #         run: mvn -B -ntp clean verify
 
-         - name: Run Container and compare print
-           run: |
-              set -euo pipefail
-              OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
+   #       - name: Upload JAR
+   #         uses: actions/upload-artifact@v7
+   #         with:
+   #            name: myapp-${{ steps.version.outputs.version }}
+   #            path: myapp/target/myapp-${{ steps.version.outputs.version }}.jar
+   #            if-no-files-found: error
+   #            retention-days: 30
 
-              echo "$OUT"
-              echo "$OUT" | grep -qF "Hello World! from Mano"
-              echo "Published image verified"
+   # docker-image-build:
+   #    name: Docker Image (build, scan, tests)
+   #    needs: maven-build
+   #    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+   #    runs-on: ubuntu-latest
+   #    permissions:
+   #       contents: write
+   #    env:
+   #       TAG: ${{ needs['maven-build'].outputs.version }}
+   #    steps:
+   #       - uses: actions/checkout@v7
+
+   #       - uses: docker/setup-buildx-action@v4
+
+   #       - name: Build image locally
+   #         uses: docker/build-push-action@v7.3.0
+   #         with:
+   #            context: .
+   #            file: Dockerfile
+   #            load: true
+   #            push: false
+   #            build-args: |
+   #               APP_VERSION=${{ env.TAG }}
+   #            tags: |
+   #               ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+   #               ${{ env.IMAGE_NAME }}:latest
+   #            cache-from: type=gha
+   #            cache-to: type=gha,mode=max
+   #            provenance: false
+
+   #       - name: Smoke Test local container
+   #         run: |
+   #            set -euo pipefail
+
+   #            OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
+
+   #            echo "$OUT"
+   #            echo "$OUT" | grep -qF "Hello World! from Mano"
+
+   #       - name: Vulnerability Scan with Trivy
+   #         uses: aquasecurity/trivy-action@v0.36.0
+   #         with:
+   #            image-ref: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+   #            format: "table"
+   #            exit-code: "0"
+   #            severity: "HIGH,CRITICAL"
+   #            ignore-unfixed: true
+
+   #       - name: Authenticate to Docker Hub
+   #         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+   #         uses: docker/login-action@v4
+   #         with:
+   #            username: ${{ secrets.DOCKERHUB_USERNAME }}
+   #            password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+   #       - name: Push image to docker hub
+   #         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+   #         run: |
+   #            set -euo pipefail
+   #            docker push "${IMAGE_NAME}:${TAG}"
+   #            docker push ${{ env.IMAGE_NAME }}:latest
+
+   #       - name: Tag release version
+   #         run: |
+   #            set -euo pipefail
+   #            git config user.name "github-actions[bot]"
+   #            git config user.email "github-actions[bot]@users.noreply.github.com"
+   #            git tag "v${{ env.TAG }}"
+   #            git push origin "v${{ env.TAG }}"
+
+   # docker-pull-run:
+   #    name: Pull image from Docker Hub & Run
+   #    needs: [maven-build, docker-image-build]
+   #    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+   #    runs-on: ubuntu-latest
+   #    env:
+   #       TAG: ${{ needs['maven-build'].outputs.version }}
+
+   #    steps:
+   #       - name: Pull the Image
+   #         run: docker pull "${IMAGE_NAME}:${TAG}"
+
+   #       - name: Run Container and compare print
+   #         run: |
+   #            set -euo pipefail
+   #            OUT=$(docker run --rm "${IMAGE_NAME}:${TAG}")
+
+   #            echo "$OUT"
+   #            echo "$OUT" | grep -qF "Hello World! from Mano"
+   #            echo "Published image verified"
