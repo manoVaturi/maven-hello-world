@@ -21,15 +21,13 @@ env:
    JAVA_VERSION: "8"
    JAVA_DISTRIBUTION: "temurin"
    WORKING_DIR: "myapp"
+   HELM_CHART_DIR: "helm"
 
 jobs:
    static-analysis:
-      name: Static Analysis (SAST, Dockerfile, IaC)
+      name: Static Analysis (SAST, Dockerfile)
       runs-on: ubuntu-latest
       timeout-minutes: 15
-      permissions:
-         contents: read
-         security-events: write
       steps:
          - uses: actions/checkout@v7
 
@@ -37,9 +35,6 @@ jobs:
            uses: hadolint/hadolint-action@v3.5.0
            with:
               dockerfile: Dockerfile
-              format: sarif
-              output-file: hadolint.sarif
-              no-fail: true
 
          - name: SAST scan with Semgrep
            run: |
@@ -47,8 +42,51 @@ jobs:
 
               docker run --rm -v "${{ github.workspace }}:/src" -w /src \
               semgrep/semgrep:1.86.0 \
-              semgrep scan --config p/ci --sarif --output /src/semgrep.sarif \
-              --severity ERROR --severity WARNING --metrics=off
+              semgrep scan --config p/ci \
+              --severity ERROR --severity WARNING --metrics=off --error
+
+   # chart-validation:
+   #    name: Validation of Helm Chart
+   #    runs-on: ubuntu-latest
+   #    timeout-minutes: 10
+   #    steps:
+   #       - uses: actions/checkout@v7
+
+   #       - uses: azure/setup-helm@v5.0.0
+
+   #       - name: Lint chart
+   #         run: |
+   #            set -euo pipefail
+
+   #            helm lint "${HELM_CHART_DIR}" --strict
+
+   #       - name: Render templates
+   #         run: helm template myapp "${{ env.HELM_CHART_DIR }}" --output-dir rendered
+
+   #       - name: Validate rendered manifests against k8s schema
+   #         uses: docker://ghcr.io/yannh/kubeconform:latest
+   #         with:
+   #            entrypoint: /kubeconform
+   #            args: -strict -summary rendered
+
+   maven-build:
+      name: Build, Test & Scan
+      runs-on: ubuntu-latest
+      timeout-minutes: 20
+      outputs:
+         version: ${{ steps.version.outputs.version }}
+      steps:
+         - name: Checkout Source Code
+           uses: actions/checkout@v7
+           with:
+              fetch-depth: 0
+
+         - name: Setup JDK ${{ env.JAVA_VERSION }}
+           uses: actions/setup-java@v6
+           with:
+              java-version: ${{ env.JAVA_VERSION }}
+              distribution: ${{ env.JAVA_DISTRIBUTION }}
+              cache: maven
 
    # maven-build:
    #    name: Build, Test & Scan
