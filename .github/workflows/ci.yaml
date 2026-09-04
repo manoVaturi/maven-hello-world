@@ -47,7 +47,7 @@ jobs:
 
               docker run --rm -v "${{ github.workspace }}:/src" -w /src \
               semgrep/semgrep:1.86.0 \
-              semgrep scan --config auto --sarif --output /src/semgrep.sarif \
+              semgrep scan --config p/ci --sarif --output /src/semgrep.sarif \
               --severity ERROR --severity WARNING --metrics=off
 
    # maven-build:
