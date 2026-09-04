@@ -25,6 +25,7 @@ env:
    APP_MESSAGE: "Hello World! from Mano"
 
 jobs:
+   # Check if there any changes in the app code\dockerfile or chart
    changes:
       name: Detect App Code changes
       runs-on: ubuntu-latest
@@ -47,6 +48,7 @@ jobs:
                  chart:
                    - 'helm/**'
 
+   # Shift left SAST
    static-analysis:
       name: Static Analysis (SAST, Dockerfile)
       runs-on: ubuntu-latest
@@ -69,6 +71,7 @@ jobs:
               --severity ERROR --severity WARNING --metrics=off --error \
               --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
 
+   # Validation of cutom helm chart
    chart-validation:
       name: Validation of Helm Chart
       runs-on: ubuntu-latest
@@ -97,6 +100,7 @@ jobs:
               entrypoint: /kubeconform
               args: -strict -summary rendered
 
+   # Maven build, tests and scans before packing to a container
    maven-build:
       name: Build, Test & Scan
       runs-on: ubuntu-latest
@@ -123,6 +127,7 @@ jobs:
               set -euo pipefail
               git fetch --tags --force --quiet
 
+              # manual trigger = testing, dont bump the real version
               if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
                  BASE="manual"
                  LAST=""
@@ -172,6 +177,7 @@ jobs:
               if-no-files-found: warn
               retention-days: 7
 
+   # build, scan and push the image, only on master or manual run
    docker-image-build:
       name: Docker Image (Build, Scan , Push)
       # needs: [changes, maven-build, static-analysis, chart-validation]
@@ -201,7 +207,7 @@ jobs:
                  ${{ env.IMAGE_NAME }}:${{ env.TAG }}
                  ${{ env.IMAGE_NAME }}:latest
               cache-from: type=gha
-              cache-to: type=gha,mode=max
+              cache-to: type=gha,mode=max # needs buildx, docker driver cant export cache
               provenance: false
 
          - name: Smoke test local Container
@@ -255,7 +261,7 @@ jobs:
                } >> "$GITHUB_STEP_SUMMARY"
 
          - name: Tag release version
-           if: github.event_name != 'workflow_dispatch'
+           if: github.event_name != 'workflow_dispatch' # manual runs reuse 1.0.0, tag would already exist
            run: |
               set -euo pipefail
               git config user.name "github-actions[bot]"
@@ -263,6 +269,7 @@ jobs:
               git tag "v${TAG}"
               git push origin "v${TAG}"
 
+   # make sure what we pushed actually works, pull it back and run it
    docker-pull-run:
       name: Verify pushed image
       needs: [maven-build, docker-image-build]
@@ -290,6 +297,7 @@ jobs:
                echo "$OUT" | grep -qF "${{ env.APP_MESSAGE }}"
                echo "Published image verified at ${TAG}"
 
+   # spin up throwaway kind cluster and deploy with helm, local image only
    helm-deploy:
       name: Create k8s cluster and deploy app with Helm
       needs: [maven-build, docker-image-build]
@@ -331,6 +339,7 @@ jobs:
            run: |
               set -euo pipefail
 
+              # --wait blocks till the job actually completes, not just gets created
               helm upgrade --install "${RELEASE}" "${HELM_CHART_DIR}" \
                  --namespace "${NAMESPACE}" \
                  --create-namespace \
