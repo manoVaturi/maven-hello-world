@@ -74,8 +74,8 @@ jobs:
       name: Build, Test & Scan
       runs-on: ubuntu-latest
       timeout-minutes: 20
-      # outputs:
-      #    version: ${{ steps.version.outputs.version }}
+      outputs:
+         version: ${{ steps.version.outputs.version }}
       steps:
          - name: Checkout Source Code
            uses: actions/checkout@v7
@@ -149,6 +149,8 @@ jobs:
          TAG: ${{ needs['maven-build'].outputs.version }}
       steps:
          - uses: actions/checkout@v7
+
+         - uses: docker/setup-buildx-action@v4
 
          - name: Build Image locally
            uses: docker/build-push-action@v7.3.0
