@@ -12,7 +12,7 @@ A minimal Java 7/8 app acting as a playground for a CI/CD pipeline (Maven, GitHu
 
 - **Non-root by UID:** runtime pinned to `USER 65532:65532`, ownership rewritten on copy (`--chown=65532:65532`). The Helm chart's `securityContext` mirrors this exactly (`runAsUser/Group: 65532`, `readOnlyRootFilesystem: true`, all capabilities dropped) since distroless doesn't need a writable root FS.
 
-- **SAST on fetch:** Semgrep runs straight off checkout, before any build. `--error` makes it a real gate — findings fail the job, not just report.
+- **Layered static analysis:** hadolint (Dockerfile), Semgrep (SAST, `p/ci` ruleset), and gitleaks (secret scanning across full history) all run straight off checkout, before any build. Semgrep's `--error` and gitleaks' non-zero exit make both real gates — findings fail the job, not just report.
 
 - **Helm/Kubernetes deploy:** a throwaway `kind` cluster is spun up on the runner and the app is deployed with Helm as an end-to-end integration check, not a real deployment target.
 
@@ -28,11 +28,16 @@ helm/
   values.yaml
   templates/
 .github/workflows/
+  ci.yaml              # master push + PR-to-master + workflow_dispatch: full build/test/deploy/publish pipeline
+  branch-scan.yaml      # push to any other branch: fast static-analysis-only feedback
+  static-analysis.yaml  # reusable job (hadolint, Semgrep, gitleaks) shared by both of the above
 ```
 
 **Init project**
 
 Fork, clone the repo. On GitHub: Settings → Branches → add a rule for `master` — require a pull request before merging, require the `maven-build` status check, disallow force pushes.
+
+Repo needs `vars.DOCKERHUB_USERNAME` (Actions variable) and `secrets.DOCKERHUB_TOKEN` (Actions secret) set for the publish jobs to authenticate to Docker Hub.
 
 **Build and run locally**
 
@@ -49,28 +54,27 @@ Final stage: `gcr.io/distroless/java:8` — ships a non-root user already, ~188M
 
 ## CI pipeline
 
-Runs on `push` to **any** branch, and `workflow_dispatch`. No `pull_request` trigger — `push` already fires for every commit, PR or not, so a `pull_request` trigger would just re-run the exact same checks a second time for the same commit.
+Two workflows split fast feedback from the full pipeline, so a WIP feature branch push doesn't pay the cost of a Docker build, an image scan, and a `kind` cluster deploy just to catch a lint error:
 
-That has one real cost: a fork's commits never generate a `push` event on this repo, so a fork-submitted PR would get no checks at all. This is a solo repo with no outside contributors, so that's an acceptable trade, not an oversight — revisit if that changes.
+- **`branch-scan.yaml`** — triggers on `push` to any branch *except* `master` (`branches-ignore: master`). Runs only the reusable `static-analysis` job (hadolint, Semgrep, gitleaks). This is the feedback you get on every commit to a WIP branch, before a PR even exists.
+- **`ci.yaml`** — triggers on `push` to `master`, `pull_request` targeting `master`, and `workflow_dispatch`. Runs the full pipeline: static analysis, chart validation, Maven build/test, Docker image build/scan, Helm/`kind` deploy, and — gated further — Docker Hub publish.
 
-**Validation jobs — `changes`, `static-analysis`, `chart-validation`, `maven-build`:**
+Because `push` is scoped to `master` and `pull_request` covers everything opened against it, the same commit only ever produces one `ci.yaml` run: a feature-branch push fires `pull_request` (not `push`, since the branch isn't `master`), and a merge to `master` fires `push` (not `pull_request`, since there's no PR event for a direct/merge commit onto `master`). This also means a PR from a fork gets full checks too, since `pull_request` fires regardless of same-repo vs. fork — unlike a `push`-only setup, which forks never trigger.
 
-These run on every push, including a WIP feature branch with no PR open yet — that's the point, you get feedback before you even open a PR, not just once it exists.
+**Validation jobs — `changes`, `static-analysis`, `chart-validation`, `maven-build`** (in `ci.yaml`):
 
-- `static-analysis` — hadolint on the Dockerfile, Semgrep SAST (`p/ci` ruleset, `--error` so findings fail the build).
+- `static-analysis` — calls the shared `static-analysis.yaml` workflow: hadolint on the Dockerfile, Semgrep SAST (`p/ci` ruleset, `--error` so findings fail the build), gitleaks secret scan over full git history (`fetch-depth: 0`).
 - `chart-validation` — `helm lint --strict`, `helm template` against a placeholder image (the real one isn't built yet at this point), then `kubeconform` against the actual Kubernetes API schema.
 - `changes` — `dorny/paths-filter` checks whether `myapp/**`, `Dockerfile`, or `.dockerignore` changed. Its output gates `docker-image-build` below.
-- `maven-build` — compiles and runs unit tests, so a broken build fails fast on any branch. This is also the required branch-protection check (`Build, Test & Scan`, matching the job's `name:` field — the check name GitHub reports, not the YAML job id) — it's why `maven-build` deliberately never gates on `needs.changes.outputs.app`: a required check that's conditionally skipped never gets a second run to report success for that commit, so it'd block merging forever on any doc-only or chart-only change.
-
-Earlier this repo tried both `push` and `pull_request` triggers together, with a same-repo-vs-fork guard to avoid double-running. That created two check-runs sharing the identical name `Build, Test & Scan` for one commit (one `success`, one `skipped`) — which GitHub's required-status-check matching resolved inconsistently, occasionally leaving a mergeable PR stuck on "Expected — waiting for status to be reported." Dropping `pull_request` removes the duplicate-name case at the source.
+- `maven-build` — compiles and runs unit tests, so a broken build fails fast. This is also the required branch-protection check (`Build, Test & Scan`, matching the job's `name:` field — the check name GitHub reports, not the YAML job id) — it's why `maven-build` deliberately never gates on `needs.changes.outputs.app`: a required check that's conditionally skipped never gets a second run to report success for that commit, so it'd block merging forever on any doc-only or chart-only change.
 
 **Build + integration test — `docker-image-build`, `helm-deploy`:**
 
-These run whenever app code actually changed (`needs.changes.outputs.app == 'true'`) — on a feature branch push before a PR even exists, on the PR, and again after merge to `master`. The point: master should never be broken by something a Docker build or a real Helm/Kubernetes deploy would have caught, so both run pre-merge, not just after.
+These run whenever app code actually changed (`needs.changes.outputs.app == 'true'`) — on the PR, and again after merge to `master`. The point: master should never be broken by something a Docker build or a real Helm/Kubernetes deploy would have caught, so both run pre-merge, not just after.
 
 **Publish path — `docker-image-publish`, `docker-pull-run`:**
 
-Gated separately, on `event_name == 'push' && ref == 'refs/heads/master'` (a real merge) or `workflow_dispatch`. `docker-image-publish` needs `docker-image-build` *and* `helm-deploy` to have succeeded first — so even the master-push's own build+integration-test has to pass before anything gets pushed to Docker Hub or tagged. It reuses the image artifact `docker-image-build` already produced in the same workflow run rather than rebuilding, then pushes and creates the git tag. `docker-pull-run` does a separate real pull from Docker Hub afterward as the actual "did the publish work" check.
+Gated separately, on `event_name == 'push' && ref == 'refs/heads/master'` (a real merge) or `workflow_dispatch`. `docker-image-publish` needs `docker-image-build` *and* `helm-deploy` to have succeeded first — so even the master-push's own build+integration-test has to pass before anything gets pushed to Docker Hub or tagged. It reuses the image artifact `docker-image-build` already produced in the same workflow run rather than rebuilding, then pushes and creates the git tag. Docker Hub auth uses `vars.DOCKERHUB_USERNAME` (a public repo variable, not a secret — usernames aren't sensitive) and `secrets.DOCKERHUB_TOKEN`. `docker-pull-run` does a separate real pull from Docker Hub afterward as the actual "did the publish work" check.
 
 **Versioning**
 
@@ -78,7 +82,7 @@ Version is resolved from git tags at build time, not stored in `pom.xml` (pom st
 
 A manual `workflow_dispatch` run always uses a fixed `1.0.0` test version instead of bumping — it's meant for exercising the pipeline, not shipping a release — and skips the git-tag step entirely (tagging `v1.0.0` a second time would collide with itself).
 
-The real git tag (`vX.Y.Z`) is only created as the last step of `docker-image-build`, after the image has built, smoke-tested, scanned, and actually pushed — so a tag only ever exists for a version that genuinely shipped.
+The real git tag (`vX.Y.Z`) is only created as the last step of `docker-image-publish`, after the image has built, smoke-tested, scanned, deployed to `kind`, and actually pushed — so a tag only ever exists for a version that genuinely shipped. Current released series: `v1.0.0` – `v1.0.7`.
 
 **Docker image stage**
 
@@ -90,9 +94,13 @@ The app is modeled as a Kubernetes `Job`, not a `Deployment` — it's genuinely 
 
 `helm-deploy`:
 - Spins up a `kind` cluster on the runner.
-- Downloads the image artifact `docker-image-build` already saved (not another Docker Hub pull — `docker-pull-run` already proved the registry copy works, so re-pulling here would just be slower, redundant plumbing) and `kind load docker-image`s it straight onto the cluster's node. `imagePullPolicy: IfNotPresent` means the pod uses that local copy without touching a registry.
+- Downloads the image artifact `docker-image-build` already saved (not another Docker Hub pull — `docker-pull-run` already proves the registry copy works, so re-pulling here would just be slower, redundant plumbing) and `kind load docker-image`s it straight onto the cluster's node. `imagePullPolicy: IfNotPresent` means the pod uses that local copy without touching a registry.
 - Installs with `helm upgrade --install --wait --wait-for-jobs`. `--wait-for-jobs` matters specifically: plain `--wait` only covers Deployments/StatefulSets/ReplicaSets — it does not wait for a bare `Job` to reach `Complete`, only for it to be created.
 - Verifies by looking up the Job via label selector, `kubectl wait --for=condition=complete`, then grepping its logs for the expected output.
 - On failure, a dedicated step dumps pod/job state, `describe`, events, and logs, so a failed run explains itself in the Action log instead of reporting a bare timeout.
 
 `values.yaml` sets a small `resources.requests` but deliberately no `limits.memory` — this JVM isn't cgroup-aware by default (see the Java 7/8 note above), so a container memory limit risks a silent kernel OOM-kill that the JVM's own `-XX:+ExitOnOutOfMemoryError` can't catch (that only fires on a Java-heap OOM, not an external cgroup kill).
+
+## Repo history notes
+
+Earlier iterations of this pipeline tried `push`-to-any-branch plus `pull_request`-to-master together with a same-repo-vs-fork guard, to avoid double-running. That created two check-runs sharing the identical name `Build, Test & Scan` for one commit (one `success`, one `skipped`) — which GitHub's required-status-check matching resolved inconsistently, occasionally leaving a mergeable PR stuck on "Expected — waiting for status to be reported." The fix went through two stages: first dropping `pull_request` entirely (relying solely on `push` to any branch), then — once fast per-branch feedback was wanted back without reintroducing the duplicate-name problem — splitting into today's two-workflow setup (`branch-scan.yaml` for non-master pushes, `ci.yaml` scoped to `push:master` + `pull_request:master`), which gets both fast feedback and fork-PR coverage without any commit ever matching both triggers at once.
