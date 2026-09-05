@@ -20,6 +20,7 @@ env:
    IMAGE_NAME: ${{ vars.DOCKERHUB_USERNAME }}/myapp
    JAVA_VERSION: "8"
    JAVA_DISTRIBUTION: "temurin"
+
    WORKING_DIR: "myapp"
    HELM_CHART_DIR: "helm"
    APP_MESSAGE: "Hello World! from Mano"
@@ -289,6 +290,7 @@ jobs:
 
               kubectl get pods -n "${NAMESPACE}" -o wide || true
               kubectl get jobs -n "${NAMESPACE}" -o wide || true
+
               kubectl describe job -l app.kubernetes.io/instance="${RELEASE}" -n "${NAMESPACE}" || true
               kubectl describe pods -l app.kubernetes.io/instance="${RELEASE}" -n "${NAMESPACE}" || true
               kubectl logs -l app.kubernetes.io/instance="${RELEASE}" -n "${NAMESPACE}" --all-containers --tail=200 || true
@@ -343,8 +345,10 @@ jobs:
            if: github.event_name != 'workflow_dispatch' # manual runs reuse 1.0.0, tag would already exist
            run: |
               set -euo pipefail
+
               git config user.name "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"
+
               git tag "v${TAG}"
               git push origin "v${TAG}"
 
