@@ -61,6 +61,68 @@ Two workflows split fast feedback from the full pipeline, so a WIP feature branc
 
 Because `push` is scoped to `master` and `pull_request` covers everything opened against it, the same commit only ever produces one `ci.yaml` run: a feature-branch push fires `pull_request` (not `push`, since the branch isn't `master`), and a merge to `master` fires `push` (not `pull_request`, since there's no PR event for a direct/merge commit onto `master`). This also means a PR from a fork gets full checks too, since `pull_request` fires regardless of same-repo vs. fork — unlike a `push`-only setup, which forks never trigger.
 
+### Branching model
+
+Trunk-based: `master` is the only long-lived branch. Feature branches are short-lived and merge back quickly; a release tag (`vX.Y.Z`) only ever lands on `master`, only after a real publish.
+
+```mermaid
+%%{init: { 'gitGraph': { 'mainBranchName': 'master' } } }%%
+gitGraph
+   commit tag: "v1.0.7"
+   branch feature/add-metrics
+   commit
+   commit
+   checkout master
+   merge feature/add-metrics tag: "v1.0.8"
+```
+
+### Pipeline flow, by trigger
+
+Each trigger runs a different subset of jobs. Below is the job graph GitHub Actions draws for each case.
+
+**1. Push to a feature branch** → `branch-scan.yaml`
+
+```mermaid
+flowchart LR
+    A[static-analysis]
+```
+
+**2. Pull request → `master`** → `ci.yaml`, everything except publish
+
+```mermaid
+flowchart LR
+    A[changes] --> E[docker-image-build]
+    B[static-analysis] --> E
+    C[maven-build] --> E
+    E --> F[helm-deploy]
+    A --> F
+    C --> F
+    D[chart-validation]
+```
+
+**3. Push to `master` (merge) / manual `workflow_dispatch`** → `ci.yaml`, full pipeline
+
+```mermaid
+flowchart LR
+    A[changes] --> E[docker-image-build]
+    B[static-analysis] --> E
+    C[maven-build] --> E
+    E --> F[helm-deploy]
+    A --> F
+    C --> F
+    F --> G[docker-image-publish]
+    E --> G
+    C --> G
+    G --> H[docker-pull-run]
+    C --> H
+    D[chart-validation]
+```
+
+Notes:
+- `docker-image-build` / `helm-deploy` are skipped on a PR that only touches docs or unrelated files (`changes` reports no app diff) — a manual run always includes them.
+- `docker-image-publish` / `docker-pull-run` only appear on graph 3 — a PR never pushes to Docker Hub or creates a tag, even if every job above it passes.
+- `maven-build` is the required branch-protection check (`Build, Test & Scan`), which is why it never depends on `changes`.
+
 **Validation jobs — `changes`, `static-analysis`, `chart-validation`, `maven-build`** (in `ci.yaml`):
 
 - `static-analysis` — calls the shared `static-analysis.yaml` workflow: hadolint on the Dockerfile, Semgrep SAST (`p/ci` ruleset, `--error` so findings fail the build), gitleaks secret scan over full git history (`fetch-depth: 0`).
