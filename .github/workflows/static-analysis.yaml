@@ -1,40 +1,40 @@
 name: Static Analysis (reusable)
 
 on:
-   workflow_call:
+  workflow_call:
 
 permissions:
-   contents: read
+  contents: read
 
 jobs:
-   static-analysis:
-      name: Static Analysis (SAST, Dockerfile, Secrets)
-      runs-on: ubuntu-latest
-      timeout-minutes: 15
-      steps:
-         - uses: actions/checkout@v7
-           with:
-              fetch-depth: 0 # full history so gitleaks scans past commits
+  static-analysis:
+    name: Static Analysis (SAST, Dockerfile, Secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history so gitleaks scans past commits
 
-         - name: Lint Dockerfile with hadolint
-           uses: hadolint/hadolint-action@v3.5.0
-           with:
-              dockerfile: Dockerfile
+      - name: Lint Dockerfile with hadolint
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: Dockerfile
 
-         - name: SAST scan with Semgrep
-           run: |
-              set -euo pipefail
+      - name: SAST scan with Semgrep
+        run: |
+          set -euo pipefail
 
-              docker run --rm -v "${{ github.workspace }}:/src" -w /src \
-              semgrep/semgrep:1.86.0 \
-              semgrep scan --config p/ci \
-              --severity ERROR --severity WARNING --metrics=off --error \
-              --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
+          docker run --rm -v "${{ github.workspace }}:/src" -w /src \
+          semgrep/semgrep:1.86.0 \
+          semgrep scan --config p/ci \
+          --severity ERROR --severity WARNING --metrics=off --error \
+          --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
 
-         - name: Secret scan with gitleaks
-           run: |
-              set -euo pipefail
+      - name: Secret scan with gitleaks
+        run: |
+          set -euo pipefail
 
-              docker run --rm -v "${{ github.workspace }}:/repo" \
-              zricethezav/gitleaks:v8.18.4 \
-              detect --source /repo -v --redact
+          docker run --rm -v "${{ github.workspace }}:/repo" \
+          zricethezav/gitleaks:v8.18.4 \
+          detect --source /repo -v --redact

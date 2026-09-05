@@ -1,18 +1,18 @@
 name: Branch Fast Checks and scans
 
 on:
-   push:
-      branches-ignore:
-         - master
+  push:
+    branches-ignore:
+      - master
 
 concurrency:
-   group: ${{ github.workflow }}-${{ github.ref }}
-   cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
-   contents: read
+  contents: read
 
 jobs:
-   static-analysis:
-      name: Static Analysis (SAST, Dockerfile, Secrets)
-      uses: ./.github/workflows/static-analysis.yaml
+  static-analysis:
+    name: Static Analysis (SAST, Dockerfile, Secrets)
+    uses: ./.github/workflows/static-analysis.yaml
