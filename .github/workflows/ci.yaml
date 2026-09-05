@@ -50,26 +50,8 @@ jobs:
 
    # Shift left SAST
    static-analysis:
-      name: Static Analysis (SAST, Dockerfile)
-      runs-on: ubuntu-latest
-      timeout-minutes: 15
-      steps:
-         - uses: actions/checkout@v7
-
-         - name: Lint Dockerfile with hadolint
-           uses: hadolint/hadolint-action@v3.5.0
-           with:
-              dockerfile: Dockerfile
-
-         - name: SAST scan with Semgrep
-           run: |
-              set -euo pipefail
-
-              docker run --rm -v "${{ github.workspace }}:/src" -w /src \
-              semgrep/semgrep:1.86.0 \
-              semgrep scan --config p/ci \
-              --severity ERROR --severity WARNING --metrics=off --error \
-              --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
+      name: Static Analysis (SAST, Dockerfile & Secrets)
+      uses: ./.github/workflows/static-analysis.yaml
 
    # Validation of cutom helm chart
    chart-validation:
